@@ -1,0 +1,4 @@
+/target
+
+# Local Claude Code settings (machine-specific)
+/.claude/
