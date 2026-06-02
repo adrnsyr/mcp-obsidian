@@ -1,5 +1,8 @@
 # mcp-obsidian
 
+[![CI](https://github.com/adrnsyr/mcp-obsidian/actions/workflows/ci.yml/badge.svg)](https://github.com/adrnsyr/mcp-obsidian/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 MCP server (Rust) untuk **menulis, membaca, mencari, dan memetakan memori
 per-project** ke dalam sebuah [Obsidian](https://obsidian.md) Vault.
 
