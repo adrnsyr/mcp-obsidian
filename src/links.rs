@@ -335,7 +335,10 @@ mod tests {
 
     #[test]
     fn missing_targets_only_dangling() {
-        let mems = [mem("a", "ke [[b]] dan [[hantu]]", &["c"]), mem("b", "", &[])];
+        let mems = [
+            mem("a", "ke [[b]] dan [[hantu]]", &["c"]),
+            mem("b", "", &[]),
+        ];
         let existing: BTreeSet<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
         // 'b' ada, 'c' & 'hantu' tidak.
         assert_eq!(missing_targets(&mems[0], &existing), vec!["c", "hantu"]);

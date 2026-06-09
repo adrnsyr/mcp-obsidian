@@ -506,7 +506,9 @@ impl ObsidianServer {
                 continue;
             }
             for e in memory::list_entries(&self.config, &other) {
-                elsewhere.entry(slugify(&e.name)).or_insert_with(|| other.clone());
+                elsewhere
+                    .entry(slugify(&e.name))
+                    .or_insert_with(|| other.clone());
             }
         }
         let mut also_elsewhere = 0usize;
@@ -522,7 +524,10 @@ impl ObsidianServer {
 
         let mut val = serde_json::to_value(&report).map_err(err)?;
         if let serde_json::Value::Object(ref mut map) = val {
-            map.insert("near_duplicates".into(), serde_json::Value::Array(near.clone()));
+            map.insert(
+                "near_duplicates".into(),
+                serde_json::Value::Array(near.clone()),
+            );
         }
         let json = serde_json::to_string_pretty(&val).map_err(err)?;
         let header = format!(
@@ -544,7 +549,11 @@ impl ObsidianServer {
 
     /// Pasangan memori dengan kemiripan embedding ≥ `NEAR_DUP_THRESHOLD`.
     /// Kosong bila fitur `semantic` mati (embedding tak tersedia).
-    fn near_duplicates(&self, project: &str, memories: &[memory::Memory]) -> Vec<serde_json::Value> {
+    fn near_duplicates(
+        &self,
+        project: &str,
+        memories: &[memory::Memory],
+    ) -> Vec<serde_json::Value> {
         let Some(vecs) = embed::vectors_for(&self.config, project, memories) else {
             return Vec::new();
         };
@@ -558,9 +567,7 @@ impl ObsidianServer {
                 }
             }
         }
-        pairs.sort_by(|a, b| {
-            b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        pairs.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
         pairs
             .into_iter()
             .map(|(a, b, s)| serde_json::json!({ "a": a, "b": b, "score": s }))
@@ -772,8 +779,8 @@ impl ObsidianServer {
     ) -> Result<CallToolResult, McpError> {
         let _guard = self.io_lock.lock().await;
         let project = self.project_of(args.project.as_deref())?;
-        let outcome =
-            memory::rename_memory(&self.config, &project, &args.name, &args.new_name).map_err(err)?;
+        let outcome = memory::rename_memory(&self.config, &project, &args.name, &args.new_name)
+            .map_err(err)?;
         regenerate_moc(&self.config, &project).map_err(err)?;
         let text = format!(
             "Memori '{}' → '{}' di project '{}'. {} perujuk diperbarui{}.",
@@ -807,11 +814,16 @@ impl ObsidianServer {
         let memories = memory::load_all(&self.config, &project);
 
         let kw = memory::search(&self.config, &project, Some(&args.query), None);
-        let (sem, sem_active) =
-            match embed::semantic_search(&self.config, &project, &args.query, memories.len().max(1), &memories) {
-                Ok(v) => (v, true),
-                Err(_) => (Vec::new(), false),
-            };
+        let (sem, sem_active) = match embed::semantic_search(
+            &self.config,
+            &project,
+            &args.query,
+            memories.len().max(1),
+            &memories,
+        ) {
+            Ok(v) => (v, true),
+            Err(_) => (Vec::new(), false),
+        };
         let hits = memory::merge_hybrid(&kw, &sem, top);
 
         let json = serde_json::to_string_pretty(&hits).map_err(err)?;

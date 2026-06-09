@@ -173,14 +173,18 @@ pub fn rename_memory(
 ) -> anyhow::Result<RenameOutcome> {
     let old_slug = slugify(old_name);
     let new_slug = slugify(new_name);
-    anyhow::ensure!(!new_slug.is_empty(), "nama baru tidak valid setelah disanitasi");
+    anyhow::ensure!(
+        !new_slug.is_empty(),
+        "nama baru tidak valid setelah disanitasi"
+    );
     anyhow::ensure!(
         old_slug != new_slug,
         "nama lama & baru menghasilkan slug yang sama ('{new_slug}')"
     );
 
-    let old = read_memory(config, project, &old_slug)
-        .map_err(|_| anyhow::anyhow!("memori '{old_slug}' tidak ditemukan di project '{project}'"))?;
+    let old = read_memory(config, project, &old_slug).map_err(|_| {
+        anyhow::anyhow!("memori '{old_slug}' tidak ditemukan di project '{project}'")
+    })?;
     let new_path = config.memory_file(project, &new_slug);
     anyhow::ensure!(
         !new_path.exists(),
@@ -233,7 +237,10 @@ pub fn rename_memory(
                 front: f,
                 body: new_body,
             };
-            std::fs::write(config.memory_file(project, &slug), updated.to_file_string()?)?;
+            std::fs::write(
+                config.memory_file(project, &slug),
+                updated.to_file_string()?,
+            )?;
             updated_referrers.push(slug);
         }
     }
@@ -647,12 +654,20 @@ mod tests {
     #[test]
     fn search_ranks_more_term_matches_higher() {
         let cfg = tmp_config();
-        write_memory(&cfg, "demo", simple("Both", "d", "rust dan konkurensi keduanya")).unwrap();
+        write_memory(
+            &cfg,
+            "demo",
+            simple("Both", "d", "rust dan konkurensi keduanya"),
+        )
+        .unwrap();
         write_memory(&cfg, "demo", simple("One", "d", "hanya rust di sini")).unwrap();
 
         let hits = search(&cfg, "demo", Some("rust konkurensi"), None);
         assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].name, "both", "dok yang cocok lebih banyak token harus di atas");
+        assert_eq!(
+            hits[0].name, "both",
+            "dok yang cocok lebih banyak token harus di atas"
+        );
         assert!(hits[0].score > hits[1].score);
     }
 
