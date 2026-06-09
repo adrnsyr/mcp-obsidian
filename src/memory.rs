@@ -4,6 +4,7 @@
 //! Markdown di bawah. Body boleh berisi `[[wikilink]]` ke memori lain.
 
 use crate::config::{ensure_dir, Config};
+use crate::embed::SemanticHit;
 use crate::project::slugify;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -152,6 +153,99 @@ pub fn write_memory(
     })
 }
 
+/// Hasil operasi rename.
+pub struct RenameOutcome {
+    pub old_slug: String,
+    pub new_slug: String,
+    /// Slug memori lain yang tautannya ikut diperbarui.
+    pub updated_referrers: Vec<String>,
+}
+
+/// Ganti nama (slug) sebuah memori, lalu perbarui SEMUA tautan masuk
+/// (field `links` & `[[wikilink]]` di body) milik memori lain agar tetap
+/// resolve. Timestamp `created` memori dipertahankan; `updated` di-refresh
+/// untuk memori yang berubah. Tidak menyentuh `_MOC.md` (pemanggil regen).
+pub fn rename_memory(
+    config: &Config,
+    project: &str,
+    old_name: &str,
+    new_name: &str,
+) -> anyhow::Result<RenameOutcome> {
+    let old_slug = slugify(old_name);
+    let new_slug = slugify(new_name);
+    anyhow::ensure!(!new_slug.is_empty(), "nama baru tidak valid setelah disanitasi");
+    anyhow::ensure!(
+        old_slug != new_slug,
+        "nama lama & baru menghasilkan slug yang sama ('{new_slug}')"
+    );
+
+    let old = read_memory(config, project, &old_slug)
+        .map_err(|_| anyhow::anyhow!("memori '{old_slug}' tidak ditemukan di project '{project}'"))?;
+    let new_path = config.memory_file(project, &new_slug);
+    anyhow::ensure!(
+        !new_path.exists(),
+        "target '{new_slug}' sudah ada — pilih nama lain"
+    );
+
+    let now = now_rfc3339();
+
+    // 1. Tulis file baru (pertahankan `created`), 2. hapus file lama.
+    let mut front = old.front.clone();
+    front.name = new_slug.clone();
+    front.updated = now.clone();
+    let new_mem = Memory {
+        front,
+        body: old.body.clone(),
+    };
+    std::fs::write(&new_path, new_mem.to_file_string()?)?;
+    std::fs::remove_file(config.memory_file(project, &old_slug))?;
+
+    // 3. Perbarui semua perujuk (field links + wikilink body).
+    let mut updated_referrers = Vec::new();
+    for m in load_all(config, project) {
+        let slug = slugify(&m.front.name);
+        if slug == new_slug {
+            continue; // memori hasil rename sendiri
+        }
+        let mut changed = false;
+
+        let mut links = m.front.links.clone();
+        for l in links.iter_mut() {
+            if slugify(l) == old_slug {
+                *l = new_slug.clone();
+                changed = true;
+            }
+        }
+        // dedup pasca-penggantian (jaga urutan kemunculan pertama).
+        let mut seen = std::collections::BTreeSet::new();
+        links.retain(|l| seen.insert(slugify(l)));
+
+        let new_body = crate::links::rewrite_wikilink_target(&m.body, &old_slug, &new_slug);
+        if new_body != m.body {
+            changed = true;
+        }
+
+        if changed {
+            let mut f = m.front.clone();
+            f.links = links;
+            f.updated = now.clone();
+            let updated = Memory {
+                front: f,
+                body: new_body,
+            };
+            std::fs::write(config.memory_file(project, &slug), updated.to_file_string()?)?;
+            updated_referrers.push(slug);
+        }
+    }
+    updated_referrers.sort();
+
+    Ok(RenameOutcome {
+        old_slug,
+        new_slug,
+        updated_referrers,
+    })
+}
+
 /// Baca satu memori berdasarkan slug.
 pub fn read_memory(config: &Config, project: &str, name: &str) -> anyhow::Result<Memory> {
     let slug = slugify(name);
@@ -244,7 +338,15 @@ pub fn search(
     query: Option<&str>,
     tag: Option<&str>,
 ) -> Vec<SearchHit> {
-    let q = query.map(|s| s.to_lowercase());
+    // Pecah query jadi term per-whitespace. Mencocokkan SETIAP term secara
+    // terpisah (bukan frasa utuh) agar query multi-kata seperti
+    // "io_lock konkurensi" tetap cocok walau kata-katanya tak berurutan.
+    let q_terms: Option<Vec<String>> = query.map(|s| {
+        s.to_lowercase()
+            .split_whitespace()
+            .map(|t| t.to_string())
+            .collect()
+    });
     let tag = tag.map(slugify);
     let mut hits = Vec::new();
 
@@ -261,27 +363,41 @@ pub fn search(
         let mut score = 0u32;
         let mut snippet = f.description.clone();
 
-        if let Some(q) = &q {
-            if f.name.to_lowercase().contains(q) {
-                score += 5;
+        match &q_terms {
+            // Query kosong/whitespace dianggap "tanpa query" → semua lolos.
+            Some(terms) if !terms.is_empty() => {
+                let name_lower = f.name.to_lowercase();
+                let desc_lower = f.description.to_lowercase();
+                let body_lower = mem.body.to_lowercase();
+                let mut snippet_set = false;
+                // Skor dijumlahkan lintas-term: dok yang cocok lebih banyak
+                // term naik peringkatnya. Cukup satu term cocok untuk lolos.
+                for term in terms {
+                    if name_lower.contains(term) {
+                        score += 5;
+                    }
+                    if desc_lower.contains(term) {
+                        score += 3;
+                    }
+                    if f.tags.iter().any(|x| x.to_lowercase().contains(term)) {
+                        score += 2;
+                    }
+                    if let Some(pos) = body_lower.find(term) {
+                        score += 1;
+                        if !snippet_set {
+                            snippet = make_snippet(&mem.body, pos, term.len());
+                            snippet_set = true;
+                        }
+                    }
+                }
+                if score == 0 {
+                    continue; // ada query tapi tidak ada term yang cocok
+                }
             }
-            if f.description.to_lowercase().contains(q) {
-                score += 3;
+            _ => {
+                // tanpa query (mungkin hanya filter tag): semua lolos
+                score = 1;
             }
-            if f.tags.iter().any(|x| x.to_lowercase().contains(q)) {
-                score += 2;
-            }
-            let body_lower = mem.body.to_lowercase();
-            if let Some(pos) = body_lower.find(q) {
-                score += 1;
-                snippet = make_snippet(&mem.body, pos, q.len());
-            }
-            if score == 0 {
-                continue; // ada query tapi tidak cocok sama sekali
-            }
-        } else {
-            // tanpa query (mungkin hanya filter tag): semua lolos
-            score = 1;
         }
 
         hits.push(SearchHit {
@@ -294,6 +410,70 @@ pub fn search(
     }
 
     hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.name.cmp(&b.name)));
+    hits
+}
+
+/// Satu hasil pencarian hybrid (gabungan keyword + semantik).
+#[derive(Debug, Clone, Serialize)]
+pub struct HybridHit {
+    pub name: String,
+    pub description: String,
+    /// Skor gabungan 0.0–1.0 (rata-rata komponen keyword & semantik).
+    pub score: f32,
+    /// Komponen keyword ternormalisasi (0.0–1.0).
+    pub keyword: f32,
+    /// Komponen semantik (cosine, 0.0–1.0; 0 bila fitur semantic mati).
+    pub semantic: f32,
+}
+
+/// Gabungkan hasil keyword (`SearchHit`) & semantik (`SemanticHit`) menjadi satu
+/// ranking. Keyword dinormalisasi ke skor tertinggi pada batch ini; skor akhir =
+/// rata-rata sederhana kedua komponen. Fungsi murni (tanpa I/O) agar mudah diuji.
+pub fn merge_hybrid(kw: &[SearchHit], sem: &[SemanticHit], top: usize) -> Vec<HybridHit> {
+    use std::collections::BTreeMap;
+    let max_kw = kw.iter().map(|h| h.score).max().unwrap_or(0) as f32;
+    // slug -> (kw_norm, semantic, description)
+    let mut acc: BTreeMap<String, (f32, f32, String)> = BTreeMap::new();
+    for h in kw {
+        let norm = if max_kw > 0.0 {
+            h.score as f32 / max_kw
+        } else {
+            0.0
+        };
+        let e = acc
+            .entry(h.name.clone())
+            .or_insert((0.0, 0.0, h.description.clone()));
+        e.0 = norm;
+        if e.2.is_empty() {
+            e.2 = h.description.clone();
+        }
+    }
+    for s in sem {
+        let e = acc
+            .entry(s.name.clone())
+            .or_insert((0.0, 0.0, s.description.clone()));
+        e.1 = s.score.max(0.0);
+        if e.2.is_empty() {
+            e.2 = s.description.clone();
+        }
+    }
+    let mut hits: Vec<HybridHit> = acc
+        .into_iter()
+        .map(|(name, (kwn, sem, desc))| HybridHit {
+            name,
+            description: desc,
+            score: 0.5 * kwn + 0.5 * sem,
+            keyword: kwn,
+            semantic: sem,
+        })
+        .collect();
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.name.cmp(&b.name))
+    });
+    hits.truncate(top);
     hits
 }
 
@@ -437,6 +617,129 @@ mod tests {
         let hits = search(&cfg, "demo", Some("jwt"), None);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].name, "alpha");
+    }
+
+    /// Regresi: query multi-kata harus cocok per-token, bukan sebagai frasa utuh.
+    /// Dulu query di-`.contains()` sebagai satu string, sehingga "rust konkurensi"
+    /// (yang tak pernah muncul berurutan) mengembalikan 0 hasil walau kedua kata ada.
+    #[test]
+    fn search_multiword_matches_scattered_terms() {
+        let cfg = tmp_config();
+        write_memory(
+            &cfg,
+            "demo",
+            simple(
+                "Alpha",
+                "arsitektur",
+                "ditulis dalam rust dan menjaga konkurensi via mutex",
+            ),
+        )
+        .unwrap();
+        write_memory(&cfg, "demo", simple("Beta", "lain", "tak ada kata kunci")).unwrap();
+
+        let hits = search(&cfg, "demo", Some("rust konkurensi"), None);
+        assert_eq!(hits.len(), 1, "query multi-kata harus cocok per-token");
+        assert_eq!(hits[0].name, "alpha");
+    }
+
+    /// Dok yang cocok lebih banyak term harus berperingkat lebih tinggi (skor
+    /// dijumlahkan lintas-term).
+    #[test]
+    fn search_ranks_more_term_matches_higher() {
+        let cfg = tmp_config();
+        write_memory(&cfg, "demo", simple("Both", "d", "rust dan konkurensi keduanya")).unwrap();
+        write_memory(&cfg, "demo", simple("One", "d", "hanya rust di sini")).unwrap();
+
+        let hits = search(&cfg, "demo", Some("rust konkurensi"), None);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].name, "both", "dok yang cocok lebih banyak token harus di atas");
+        assert!(hits[0].score > hits[1].score);
+    }
+
+    #[test]
+    fn rename_updates_referrers_and_preserves_created() {
+        let cfg = tmp_config();
+        // target yang akan di-rename
+        write_memory(&cfg, "demo", simple("Old Name", "d", "isi")).unwrap();
+        let created = read_memory(&cfg, "demo", "old-name").unwrap().front.created;
+        // perujuk: via field links + via wikilink body (pakai display berbeda)
+        write_memory(
+            &cfg,
+            "demo",
+            WriteInput {
+                name: "Referrer".into(),
+                description: "d".into(),
+                body: "lihat [[Old Name]] juga".into(),
+                tags: vec![],
+                kind: None,
+                links: vec!["old-name".into()],
+            },
+        )
+        .unwrap();
+
+        let out = rename_memory(&cfg, "demo", "old-name", "New Name").unwrap();
+        assert_eq!(out.new_slug, "new-name");
+        assert_eq!(out.updated_referrers, vec!["referrer"]);
+
+        // file lama hilang, baru ada, created dipertahankan.
+        assert!(read_memory(&cfg, "demo", "old-name").is_err());
+        let renamed = read_memory(&cfg, "demo", "new-name").unwrap();
+        assert_eq!(renamed.front.created, created);
+
+        // perujuk: field links & body wikilink sudah menunjuk slug baru.
+        let r = read_memory(&cfg, "demo", "referrer").unwrap();
+        assert_eq!(r.front.links, vec!["new-name"]);
+        assert!(r.body.contains("[[new-name]]"), "body: {}", r.body);
+    }
+
+    #[test]
+    fn rename_rejects_existing_target() {
+        let cfg = tmp_config();
+        write_memory(&cfg, "demo", simple("A", "d", "b")).unwrap();
+        write_memory(&cfg, "demo", simple("B", "d", "b")).unwrap();
+        let res = rename_memory(&cfg, "demo", "a", "B");
+        assert!(res.is_err(), "rename ke slug yang sudah ada harus gagal");
+    }
+
+    #[test]
+    fn merge_hybrid_combines_and_ranks() {
+        let kw = vec![
+            SearchHit {
+                name: "a".into(),
+                description: "da".into(),
+                tags: vec![],
+                score: 10,
+                snippet: String::new(),
+            },
+            SearchHit {
+                name: "b".into(),
+                description: "db".into(),
+                tags: vec![],
+                score: 5,
+                snippet: String::new(),
+            },
+        ];
+        let sem = vec![
+            SemanticHit {
+                name: "b".into(),
+                description: "db".into(),
+                score: 0.9,
+            },
+            SemanticHit {
+                name: "c".into(),
+                description: "dc".into(),
+                score: 0.8,
+            },
+        ];
+        let hits = merge_hybrid(&kw, &sem, 5);
+        // 3 slug unik (a, b, c). kw max=10 → a:kw=1.0, b:kw=0.5.
+        // b = 0.5*0.5 + 0.5*0.9 = 0.70; a = 0.5*1.0 = 0.50; c = 0.5*0.8 = 0.40.
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].name, "b");
+        assert!((hits[0].score - 0.70).abs() < 1e-6);
+        // c hanya muncul di semantic → keyword=0.
+        let c = hits.iter().find(|h| h.name == "c").unwrap();
+        assert_eq!(c.keyword, 0.0);
     }
 
     fn simple(name: &str, desc: &str, body: &str) -> WriteInput {

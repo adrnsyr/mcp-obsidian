@@ -38,8 +38,10 @@ menaut sebuah memori, memory_doctor untuk memeriksa broken link & orphan, \
 memory_cluster untuk mengelompokkan memori menjadi tema (komunitas graf), \
 memory_semantic_search untuk pencarian berdasarkan makna (bila fitur 'semantic' \
 aktif), memory_recall untuk mengambil paket konteks terpadu sebuah topik \
-(semantic + isi + graf + tema dalam satu panggilan), dan memory_delete untuk \
-menghapus.";
+(semantic + isi + graf + tema dalam satu panggilan), memory_hybrid_search untuk \
+pencarian gabungan keyword+makna, memory_link untuk menambah/menghapus tautan \
+tanpa menulis ulang body, memory_rename untuk mengganti nama memori sekaligus \
+memperbarui semua tautan masuk, dan memory_delete untuk menghapus.";
 
 #[derive(Clone)]
 pub struct ObsidianServer {
@@ -206,6 +208,50 @@ pub struct BacklinksArgs {
     pub name: String,
 }
 
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct LinkArgs {
+    /// Nama project (opsional, auto-detect bila kosong).
+    #[serde(default)]
+    pub project: Option<String>,
+    /// Slug memori yang field `links`-nya akan diubah.
+    pub name: String,
+    /// Slug yang ditambahkan ke `links` (opsional).
+    #[serde(default)]
+    pub add: Option<Vec<String>>,
+    /// Slug yang dihapus dari `links` (opsional).
+    #[serde(default)]
+    pub remove: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct RenameArgs {
+    /// Nama project (opsional, auto-detect bila kosong).
+    #[serde(default)]
+    pub project: Option<String>,
+    /// Slug memori yang akan diganti namanya.
+    pub name: String,
+    /// Nama/slug baru.
+    pub new_name: String,
+}
+
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct HybridSearchArgs {
+    /// Nama project (opsional, auto-detect bila kosong).
+    #[serde(default)]
+    pub project: Option<String>,
+    /// Kueri pencarian (digabung: kecocokan kata + makna).
+    pub query: String,
+    /// Maksimum jumlah hasil (default 5).
+    #[serde(default)]
+    pub top: Option<usize>,
+}
+
+/// Ambang cosine untuk menandai dua memori sebagai near-duplicate di doctor.
+const NEAR_DUP_THRESHOLD: f32 = 0.88;
+
 fn err(e: impl std::fmt::Display) -> McpError {
     McpError::internal_error(e.to_string(), None)
 }
@@ -259,17 +305,35 @@ impl ObsidianServer {
 
         regenerate_moc(&self.config, &project).map_err(err)?;
 
+        // Peringatkan (tanpa memblokir) bila memori ini menaut target yang belum
+        // ada — link menggantung sah ala Obsidian, tapi mudah jadi broken link.
+        let memories = memory::load_all(&self.config, &project);
+        let existing: std::collections::BTreeSet<String> =
+            memories.iter().map(|m| slugify(&m.front.name)).collect();
+        let missing = memories
+            .iter()
+            .find(|m| slugify(&m.front.name) == outcome.slug)
+            .map(|m| links::missing_targets(m, &existing))
+            .unwrap_or_default();
+
         let verb = if outcome.created {
             "Dibuat"
         } else {
             "Diperbarui"
         };
-        let text = format!(
+        let mut text = format!(
             "{verb} memori '{}' di project '{}'.\nPath: {}",
             outcome.slug,
             project,
             outcome.path.display()
         );
+        if !missing.is_empty() {
+            text.push_str(&format!(
+                "\n⚠️ Menaut memori yang belum ada: {}. (Link menggantung — buat \
+                 memori target, atau pakai memory_rename bila namanya bergeser.)",
+                missing.join(", ")
+            ));
+        }
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
@@ -432,17 +496,75 @@ impl ObsidianServer {
         let _guard = self.io_lock.lock().await;
         let project = self.project_of(args.project.as_deref())?;
         let memories = memory::load_all(&self.config, &project);
-        let report = links::doctor(&memories);
-        let json = serde_json::to_string_pretty(&report).map_err(err)?;
+        let mut report = links::doctor(&memories);
+
+        // Cross-project: tandai broken link yang targetnya sebenarnya ada di
+        // project lain (kemungkinan salah scope / kandidat rename).
+        let mut elsewhere: std::collections::BTreeMap<String, String> = Default::default();
+        for other in project::list_projects(&self.config) {
+            if other == project {
+                continue;
+            }
+            for e in memory::list_entries(&self.config, &other) {
+                elsewhere.entry(slugify(&e.name)).or_insert_with(|| other.clone());
+            }
+        }
+        let mut also_elsewhere = 0usize;
+        for b in report.broken_links.iter_mut() {
+            if let Some(p) = elsewhere.get(&b.to) {
+                b.also_in_project = Some(p.clone());
+                also_elsewhere += 1;
+            }
+        }
+
+        // Near-duplicate (hanya bila embedding tersedia / fitur semantic).
+        let near = self.near_duplicates(&project, &memories);
+
+        let mut val = serde_json::to_value(&report).map_err(err)?;
+        if let serde_json::Value::Object(ref mut map) = val {
+            map.insert("near_duplicates".into(), serde_json::Value::Array(near.clone()));
+        }
+        let json = serde_json::to_string_pretty(&val).map_err(err)?;
         let header = format!(
-            "Project '{project}': {} memori, {} broken link, {} orphan.\n",
+            "Project '{project}': {} memori, {} broken link ({} ada di project lain), \
+             {} orphan, {} stub, {} tanpa-desc, {} tanpa-tag, {} near-dup.\n",
             report.total,
             report.broken_links.len(),
-            report.orphans.len()
+            also_elsewhere,
+            report.orphans.len(),
+            report.stubs.len(),
+            report.no_description.len(),
+            report.no_tags.len(),
+            near.len(),
         );
         Ok(CallToolResult::success(vec![Content::text(format!(
             "{header}{json}"
         ))]))
+    }
+
+    /// Pasangan memori dengan kemiripan embedding ≥ `NEAR_DUP_THRESHOLD`.
+    /// Kosong bila fitur `semantic` mati (embedding tak tersedia).
+    fn near_duplicates(&self, project: &str, memories: &[memory::Memory]) -> Vec<serde_json::Value> {
+        let Some(vecs) = embed::vectors_for(&self.config, project, memories) else {
+            return Vec::new();
+        };
+        let entries: Vec<(&String, &Vec<f32>)> = vecs.iter().collect();
+        let mut pairs: Vec<(String, String, f32)> = Vec::new();
+        for i in 0..entries.len() {
+            for j in (i + 1)..entries.len() {
+                let s = embed::cosine_sim(entries[i].1, entries[j].1);
+                if s >= NEAR_DUP_THRESHOLD {
+                    pairs.push((entries[i].0.clone(), entries[j].0.clone(), s));
+                }
+            }
+        }
+        pairs.sort_by(|a, b| {
+            b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        pairs
+            .into_iter()
+            .map(|(a, b, s)| serde_json::json!({ "a": a, "b": b, "score": s }))
+            .collect()
     }
 
     #[tool(
@@ -545,6 +667,163 @@ impl ObsidianServer {
             "Recall '{}' di project '{project}' — {} memori:\n",
             args.query,
             result.items.len()
+        );
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{header}{json}"
+        ))]))
+    }
+
+    #[tool(
+        description = "Tambah/hapus tautan (field `links`) sebuah memori TANPA \
+        menulis ulang body. Beri 'add' dan/atau 'remove' (daftar slug). \
+        Regenerasi peta otomatis. Memperingatkan bila slug yang ditambahkan \
+        belum ada (link menggantung)."
+    )]
+    async fn memory_link(
+        &self,
+        Parameters(args): Parameters<LinkArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let _guard = self.io_lock.lock().await;
+        let project = self.project_of(args.project.as_deref())?;
+        let mem = memory::read_memory(&self.config, &project, &args.name).map_err(err)?;
+        let self_slug = slugify(&mem.front.name);
+
+        let mut links = mem.front.links.clone();
+        let mut removed: Vec<String> = Vec::new();
+        if let Some(rm) = args.remove {
+            for r in rm {
+                let s = slugify(&r);
+                let before = links.len();
+                links.retain(|l| slugify(l) != s);
+                if links.len() < before {
+                    removed.push(s);
+                }
+            }
+        }
+        let mut added: Vec<String> = Vec::new();
+        if let Some(ad) = args.add {
+            for a in ad {
+                let s = slugify(&a);
+                if s.is_empty() || s == self_slug {
+                    continue;
+                }
+                if !links.iter().any(|l| slugify(l) == s) {
+                    links.push(s.clone());
+                    added.push(s);
+                }
+            }
+        }
+
+        memory::write_memory(
+            &self.config,
+            &project,
+            WriteInput {
+                name: mem.front.name.clone(),
+                description: mem.front.description.clone(),
+                body: mem.body.clone(),
+                tags: mem.front.tags.clone(),
+                kind: Some(mem.front.kind.clone()),
+                links: links.clone(),
+            },
+        )
+        .map_err(err)?;
+        regenerate_moc(&self.config, &project).map_err(err)?;
+
+        // Peringatkan slug yang ditambahkan tapi belum ada.
+        let existing: std::collections::BTreeSet<String> = memory::load_all(&self.config, &project)
+            .iter()
+            .map(|m| slugify(&m.front.name))
+            .collect();
+        let dangling: Vec<String> = added
+            .iter()
+            .filter(|s| !existing.contains(*s))
+            .cloned()
+            .collect();
+
+        let mut text = format!("Tautan '{self_slug}' diperbarui di project '{project}'.");
+        if !added.is_empty() {
+            text.push_str(&format!("\n+ ditambah: {}", added.join(", ")));
+        }
+        if !removed.is_empty() {
+            text.push_str(&format!("\n- dihapus: {}", removed.join(", ")));
+        }
+        if added.is_empty() && removed.is_empty() {
+            text.push_str(" (tidak ada perubahan)");
+        }
+        if !dangling.is_empty() {
+            text.push_str(&format!(
+                "\n⚠️ Belum ada targetnya: {}.",
+                dangling.join(", ")
+            ));
+        }
+        text.push_str(&format!("\nLinks sekarang: [{}]", links.join(", ")));
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(
+        description = "Ganti nama (slug) sebuah memori DAN perbarui semua tautan \
+        masuk (field links + [[wikilink]] di body) milik memori lain agar tetap \
+        resolve. Timestamp 'created' dipertahankan. Regenerasi peta otomatis. \
+        Gagal bila slug baru sudah dipakai."
+    )]
+    async fn memory_rename(
+        &self,
+        Parameters(args): Parameters<RenameArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let _guard = self.io_lock.lock().await;
+        let project = self.project_of(args.project.as_deref())?;
+        let outcome =
+            memory::rename_memory(&self.config, &project, &args.name, &args.new_name).map_err(err)?;
+        regenerate_moc(&self.config, &project).map_err(err)?;
+        let text = format!(
+            "Memori '{}' → '{}' di project '{}'. {} perujuk diperbarui{}.",
+            outcome.old_slug,
+            outcome.new_slug,
+            project,
+            outcome.updated_referrers.len(),
+            if outcome.updated_referrers.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", outcome.updated_referrers.join(", "))
+            }
+        );
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(
+        description = "Pencarian HYBRID: gabungkan kecocokan kata (keyword) dan \
+        makna (semantik) dalam satu ranking — menutup celah keduanya (keyword \
+        gagal pada sinonim; semantik lemah pada parafrasa jauh). Tiap hasil \
+        memuat skor gabungan + komponen keyword & semantic. Bila fitur 'semantic' \
+        mati, otomatis jatuh ke keyword saja (ditandai di header)."
+    )]
+    async fn memory_hybrid_search(
+        &self,
+        Parameters(args): Parameters<HybridSearchArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let _guard = self.io_lock.lock().await;
+        let project = self.project_of(args.project.as_deref())?;
+        let top = args.top.unwrap_or(5);
+        let memories = memory::load_all(&self.config, &project);
+
+        let kw = memory::search(&self.config, &project, Some(&args.query), None);
+        let (sem, sem_active) =
+            match embed::semantic_search(&self.config, &project, &args.query, memories.len().max(1), &memories) {
+                Ok(v) => (v, true),
+                Err(_) => (Vec::new(), false),
+            };
+        let hits = memory::merge_hybrid(&kw, &sem, top);
+
+        let json = serde_json::to_string_pretty(&hits).map_err(err)?;
+        let mode = if sem_active {
+            "keyword+semantic"
+        } else {
+            "keyword saja (semantic nonaktif)"
+        };
+        let header = format!(
+            "Pencarian hybrid [{mode}] '{}' di project '{project}' — {} hasil:\n",
+            args.query,
+            hits.len()
         );
         Ok(CallToolResult::success(vec![Content::text(format!(
             "{header}{json}"

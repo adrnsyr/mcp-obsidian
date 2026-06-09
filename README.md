@@ -62,10 +62,13 @@ kategori (`type`), plus bagian **🔗 Relasi** (tautan keluar), **⬅️ Backlin
 | `memory_map` | Regenerasi `_MOC.md` & kembalikan isinya |
 | `memory_suggest` | **Relasi pintar**: usulkan tautan antar-memori berdasarkan kemiripan tag + isi (opsi `apply` untuk menulis ke `links`) |
 | `memory_backlinks` | Tampilkan memori mana yang menaut sebuah memori (dihitung dari graf) |
-| `memory_doctor` | Periksa kesehatan graf: broken link & orphan (read-only) |
+| `memory_doctor` | Periksa kesehatan graf: broken link (+ deteksi lintas-project), orphan, **stub**, metadata kosong, & **near-duplicate** (read-only) |
 | `memory_cluster` | Kelompokkan memori jadi **tema** via komunitas graf (Louvain, read-only) |
 | `memory_semantic_search` | Cari berdasarkan **makna** via embedding lokal (perlu feature `semantic`) |
+| `memory_hybrid_search` | **Hybrid**: gabungkan kecocokan kata + makna dalam satu ranking (jatuh ke keyword bila `semantic` mati) |
 | `memory_recall` | **Recall terpadu**: semantik + isi penuh + graf + tema dalam satu panggilan (perlu feature `semantic`) |
+| `memory_link` | Tambah/hapus tautan (`links`) **tanpa menulis ulang body**; memperingatkan link menggantung |
+| `memory_rename` | Ganti nama memori **dan** perbarui semua tautan masuk (field + `[[wikilink]]`); `created` dipertahankan |
 | `memory_delete` | Hapus satu memori (regenerasi peta otomatis) |
 
 Pada setiap tool, argumen `project` **opsional**. Bila kosong, project ditentukan

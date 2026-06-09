@@ -116,6 +116,10 @@ impl LinkGraph {
 pub struct BrokenLink {
     pub from: String,
     pub to: String,
+    /// Diisi oleh pemanggil (server) bila target sebenarnya ADA di project lain
+    /// — membedakan "salah scope/perlu rename" dari "benar-benar hilang".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub also_in_project: Option<String>,
 }
 
 /// Laporan kesehatan graf memori sebuah project.
@@ -126,6 +130,70 @@ pub struct DoctorReport {
     pub broken_links: Vec<BrokenLink>,
     /// Memori tanpa tautan keluar maupun masuk (terisolasi dari graf).
     pub orphans: Vec<String>,
+    /// Memori yang tampak sebagai stub/placeholder (perlu diisi).
+    pub stubs: Vec<String>,
+    /// Memori tanpa description.
+    pub no_description: Vec<String>,
+    /// Memori tanpa tag.
+    pub no_tags: Vec<String>,
+}
+
+/// Apakah memori tampak sebagai stub/placeholder yang belum berisi.
+fn is_stub(m: &Memory) -> bool {
+    if m.front.kind.eq_ignore_ascii_case("stub") {
+        return true;
+    }
+    if m.front.tags.iter().any(|t| slugify(t) == "stub") {
+        return true;
+    }
+    let upper = m.body.to_uppercase();
+    upper.contains("PERLU DIISI") || upper.contains("⚠️ STUB")
+}
+
+/// Slug tautan keluar `mem` yang menunjuk memori yang TIDAK ada di `existing`.
+/// Dipakai untuk memperingatkan link menggantung saat menulis memori.
+pub fn missing_targets(mem: &Memory, existing: &BTreeSet<String>) -> Vec<String> {
+    outgoing_links(mem)
+        .into_iter()
+        .filter(|s| !existing.contains(s))
+        .collect()
+}
+
+/// Tulis ulang body: setiap `[[target...]]` yang slug-nya == `old_slug` diganti
+/// targetnya menjadi `new_slug` (alias `|...` & heading `#...` dipertahankan).
+/// Dipakai oleh `memory_rename` untuk memperbarui wikilink di perujuk.
+pub fn rewrite_wikilink_target(body: &str, old_slug: &str, new_slug: &str) -> String {
+    let bytes = body.as_bytes();
+    let mut out = String::with_capacity(body.len());
+    let mut i = 0;
+    let mut last = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'[' && bytes[i + 1] == b'[' {
+            if let Some(rel_end) = body[i + 2..].find("]]") {
+                let inner_start = i + 2;
+                let inner_end = i + 2 + rel_end;
+                let inner = &body[inner_start..inner_end];
+                let suffix_pos = inner.find(['|', '#']);
+                let target = match suffix_pos {
+                    Some(p) => &inner[..p],
+                    None => inner,
+                };
+                if slugify(target) == old_slug {
+                    out.push_str(&body[last..inner_start]);
+                    out.push_str(new_slug);
+                    if let Some(p) = suffix_pos {
+                        out.push_str(&inner[p..]);
+                    }
+                    last = inner_end;
+                }
+                i = inner_end + 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&body[last..]);
+    out
 }
 
 /// Periksa kesehatan graf: broken link + orphan.
@@ -139,6 +207,7 @@ pub fn doctor(memories: &[Memory]) -> DoctorReport {
                 broken_links.push(BrokenLink {
                     from: from.clone(),
                     to: to.clone(),
+                    also_in_project: None,
                 });
             }
         }
@@ -165,10 +234,33 @@ pub fn doctor(memories: &[Memory]) -> DoctorReport {
         .collect();
     orphans.sort();
 
+    // Higiene metadata + deteksi stub (hanya butuh daftar memori).
+    let mut stubs = Vec::new();
+    let mut no_description = Vec::new();
+    let mut no_tags = Vec::new();
+    for m in memories {
+        let slug = slugify(&m.front.name);
+        if is_stub(m) {
+            stubs.push(slug.clone());
+        }
+        if m.front.description.trim().is_empty() {
+            no_description.push(slug.clone());
+        }
+        if m.front.tags.is_empty() {
+            no_tags.push(slug.clone());
+        }
+    }
+    stubs.sort();
+    no_description.sort();
+    no_tags.sort();
+
     DoctorReport {
         total: memories.len(),
         broken_links,
         orphans,
+        stubs,
+        no_description,
+        no_tags,
     }
 }
 
@@ -233,10 +325,43 @@ mod tests {
             rep.broken_links,
             vec![BrokenLink {
                 from: "a".into(),
-                to: "hantu".into()
+                to: "hantu".into(),
+                also_in_project: None,
             }]
         );
         assert_eq!(rep.orphans, vec!["sendirian"]);
         // b tidak orphan (ditaut oleh a), a tidak orphan (punya outgoing)
+    }
+
+    #[test]
+    fn missing_targets_only_dangling() {
+        let mems = [mem("a", "ke [[b]] dan [[hantu]]", &["c"]), mem("b", "", &[])];
+        let existing: BTreeSet<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
+        // 'b' ada, 'c' & 'hantu' tidak.
+        assert_eq!(missing_targets(&mems[0], &existing), vec!["c", "hantu"]);
+    }
+
+    #[test]
+    fn rewrite_wikilink_keeps_alias_and_heading() {
+        let body = "Lihat [[Old Name]], [[old-name|alias]], [[old-name#bab]] dan [[lain]].";
+        let got = rewrite_wikilink_target(body, "old-name", "baru");
+        assert_eq!(
+            got,
+            "Lihat [[baru]], [[baru|alias]], [[baru#bab]] dan [[lain]]."
+        );
+    }
+
+    #[test]
+    fn doctor_flags_stub_and_missing_metadata() {
+        let mut s = mem("stub-note", "## ⚠️ STUB — PERLU DIISI\nnanti", &["x"]);
+        s.front.description = "  ".into();
+        s.front.tags = vec![];
+        let mut ok = mem("ok-note", "isi lengkap", &["stub-note"]);
+        ok.front.description = "ada".into();
+        ok.front.tags = vec!["t".into()];
+        let rep = doctor(&[s, ok]);
+        assert_eq!(rep.stubs, vec!["stub-note"]);
+        assert_eq!(rep.no_description, vec!["stub-note"]);
+        assert_eq!(rep.no_tags, vec!["stub-note"]);
     }
 }

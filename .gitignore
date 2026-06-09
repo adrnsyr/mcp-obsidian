@@ -2,3 +2,6 @@
 
 # Local Claude Code settings (machine-specific)
 /.claude/
+
+# macOS
+.DS_Store
