@@ -90,6 +90,8 @@ kategori (`type`), plus bagian **🔗 Relasi** (tautan keluar), **⬅️ Backlin
 | `doc_read` | Baca isi lengkap satu dokumen |
 | `doc_list` | Daftar ringkas dokumen (opsi filter `type`) — **cara utama menemukan dokumen** karena tak terindeks |
 | `doc_search` | Cari dokumen berdasarkan kata kunci (opsi filter `type`) |
+| `doc_rename` | Ganti nama (slug) dokumen; `created` dipertahankan |
+| `doc_delete` | Hapus satu dokumen |
 
 Mode default per `type`: `brainstorm`/`worklog` → **append**, `spec`/`runbook` → **overwrite**.
 

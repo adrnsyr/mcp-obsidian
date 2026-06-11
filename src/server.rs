@@ -45,7 +45,8 @@ tanpa menulis ulang body, memory_rename untuk mengganti nama memori sekaligus \
 memperbarui semua tautan masuk, dan memory_delete untuk menghapus. \
 Untuk dokumen panjang (spec/runbook/brainstorm/worklog) gunakan keluarga doc_*: \
 doc_write/doc_append untuk menulis, doc_read untuk membaca, doc_list/doc_search \
-untuk menemukan. Dokumen disimpan di folder terpisah dan SENGAJA tidak ikut \
+untuk menemukan, doc_rename untuk mengganti nama, doc_delete untuk menghapus. \
+Dokumen disimpan di folder terpisah dan SENGAJA tidak ikut \
 diindeks ke graf/semantic/MOC, jadi pakai memori untuk fakta atomik yang \
 saling-tertaut, dan dokumen untuk catatan panjang yang dibaca/diedit manusia.";
 
@@ -331,6 +332,28 @@ pub struct DocSearchArgs {
     /// Filter berdasarkan jenis dokumen (opsional).
     #[serde(default, rename = "type")]
     pub kind: Option<String>,
+}
+
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct DocDeleteArgs {
+    /// Nama project (opsional, auto-detect bila kosong).
+    #[serde(default)]
+    pub project: Option<String>,
+    /// Nama/slug dokumen yang ingin dihapus.
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct DocRenameArgs {
+    /// Nama project (opsional, auto-detect bila kosong).
+    #[serde(default)]
+    pub project: Option<String>,
+    /// Slug dokumen yang akan diganti namanya.
+    pub name: String,
+    /// Nama/slug baru.
+    pub new_name: String,
 }
 
 /// Ambang cosine untuk menandai dua memori sebagai near-duplicate di doctor.
@@ -1102,6 +1125,46 @@ impl ObsidianServer {
         Ok(CallToolResult::success(vec![Content::text(format!(
             "{header}{json}"
         ))]))
+    }
+
+    #[tool(description = "Hapus satu dokumen dari project.")]
+    async fn doc_delete(
+        &self,
+        Parameters(args): Parameters<DocDeleteArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let _guard = self.io_lock.lock().await;
+        let project = self.project_of(args.project.as_deref())?;
+        let removed = docs::delete_doc(&self.config, &project, &args.name).map_err(err)?;
+        let text = if removed {
+            format!(
+                "Dokumen '{}' dihapus dari project '{}'.",
+                args.name, project
+            )
+        } else {
+            format!(
+                "Dokumen '{}' tidak ditemukan di project '{}'.",
+                args.name, project
+            )
+        };
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(description = "Ganti nama (slug) sebuah dokumen. Timestamp 'created' \
+        dipertahankan. Tidak ada tautan yang perlu diperbarui karena dokumen \
+        tidak bergraf.")]
+    async fn doc_rename(
+        &self,
+        Parameters(args): Parameters<DocRenameArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let _guard = self.io_lock.lock().await;
+        let project = self.project_of(args.project.as_deref())?;
+        let out =
+            docs::rename_doc(&self.config, &project, &args.name, &args.new_name).map_err(err)?;
+        let text = format!(
+            "Dokumen '{}' diganti nama menjadi '{}' di project '{}'.",
+            out.old_slug, out.new_slug, project
+        );
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 }
 

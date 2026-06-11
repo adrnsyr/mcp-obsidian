@@ -209,6 +209,65 @@ pub fn read_doc(config: &Config, project: &str, name: &str) -> anyhow::Result<Me
     Memory::from_file_string(&raw)
 }
 
+/// Hapus satu dokumen. Mengembalikan `true` bila file memang ada & terhapus.
+pub fn delete_doc(config: &Config, project: &str, name: &str) -> anyhow::Result<bool> {
+    let slug = slugify(name);
+    let path = config.docs_file(project, &slug);
+    if !path.exists() {
+        return Ok(false);
+    }
+    std::fs::remove_file(&path)?;
+    Ok(true)
+}
+
+/// Hasil operasi rename dokumen.
+pub struct DocRenameOutcome {
+    pub old_slug: String,
+    pub new_slug: String,
+}
+
+/// Ganti nama (slug) sebuah dokumen. Lebih sederhana dari memori karena dokumen
+/// tidak bergraf — tak ada tautan masuk yang perlu diperbarui. Timestamp
+/// `created` dipertahankan; `updated` di-refresh.
+pub fn rename_doc(
+    config: &Config,
+    project: &str,
+    old_name: &str,
+    new_name: &str,
+) -> anyhow::Result<DocRenameOutcome> {
+    let old_slug = slugify(old_name);
+    let new_slug = slugify(new_name);
+    anyhow::ensure!(
+        !new_slug.is_empty(),
+        "nama baru tidak valid setelah disanitasi"
+    );
+    anyhow::ensure!(
+        old_slug != new_slug,
+        "nama lama & baru menghasilkan slug yang sama ('{new_slug}')"
+    );
+
+    let old = read_doc(config, project, &old_slug).map_err(|_| {
+        anyhow::anyhow!("dokumen '{old_slug}' tidak ditemukan di project '{project}'")
+    })?;
+    let new_path = config.docs_file(project, &new_slug);
+    anyhow::ensure!(
+        !new_path.exists(),
+        "target '{new_slug}' sudah ada — pilih nama lain"
+    );
+
+    let mut front = old.front.clone();
+    front.name = new_slug.clone();
+    front.updated = now_rfc3339();
+    let new_mem = Memory {
+        front,
+        body: old.body.clone(),
+    };
+    std::fs::write(&new_path, new_mem.to_file_string()?)?;
+    std::fs::remove_file(config.docs_file(project, &old_slug))?;
+
+    Ok(DocRenameOutcome { old_slug, new_slug })
+}
+
 /// Muat semua dokumen dalam satu project. Khusus folder docs — TIDAK dipakai
 /// oleh indexer memori, jadi dokumen tak pernah mencemari graf/semantic/MOC.
 pub fn load_all_docs(config: &Config, project: &str) -> Vec<Memory> {
@@ -425,6 +484,59 @@ mod tests {
         assert_eq!(hits[0].name, "catatan");
         // filter kind yang tak cocok => kosong
         assert!(search_docs(&cfg, "p", Some("vektor"), Some("runbook")).is_empty());
+    }
+
+    #[test]
+    fn delete_removes_file() {
+        let cfg = tmp_config();
+        write_doc(
+            &cfg,
+            "p",
+            input("Buang", "spec", "", "x"),
+            WriteMode::Overwrite,
+        )
+        .unwrap();
+        assert!(delete_doc(&cfg, "p", "buang").unwrap());
+        assert!(read_doc(&cfg, "p", "buang").is_err());
+        // hapus lagi → false (tidak ada)
+        assert!(!delete_doc(&cfg, "p", "buang").unwrap());
+    }
+
+    #[test]
+    fn rename_moves_and_preserves_created() {
+        let cfg = tmp_config();
+        write_doc(
+            &cfg,
+            "p",
+            input("Nama Lama", "runbook", "Judul", "isi runbook"),
+            WriteMode::Overwrite,
+        )
+        .unwrap();
+        let created = read_doc(&cfg, "p", "nama-lama").unwrap().front.created;
+
+        let out = rename_doc(&cfg, "p", "Nama Lama", "Nama Baru").unwrap();
+        assert_eq!(out.old_slug, "nama-lama");
+        assert_eq!(out.new_slug, "nama-baru");
+
+        assert!(
+            read_doc(&cfg, "p", "nama-lama").is_err(),
+            "file lama hilang"
+        );
+        let renamed = read_doc(&cfg, "p", "nama-baru").unwrap();
+        assert_eq!(renamed.front.name, "nama-baru");
+        assert_eq!(renamed.front.kind, "runbook");
+        assert_eq!(renamed.body, "isi runbook");
+        assert_eq!(renamed.front.created, created, "created dipertahankan");
+    }
+
+    #[test]
+    fn rename_to_existing_fails() {
+        let cfg = tmp_config();
+        write_doc(&cfg, "p", input("A", "spec", "", "a"), WriteMode::Overwrite).unwrap();
+        write_doc(&cfg, "p", input("B", "spec", "", "b"), WriteMode::Overwrite).unwrap();
+        assert!(rename_doc(&cfg, "p", "A", "B").is_err());
+        // A tetap utuh setelah rename gagal
+        assert_eq!(read_doc(&cfg, "p", "a").unwrap().body, "a");
     }
 
     #[test]
