@@ -159,6 +159,7 @@ mod tests {
         Config {
             vault_path: dir,
             memory_root: "memory".into(),
+            docs_root: "docs".into(),
             default_project: Some("test".into()),
         }
     }

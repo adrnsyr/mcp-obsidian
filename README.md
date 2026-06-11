@@ -18,14 +18,24 @@ Server mengekspos ketiga kapabilitas MCP: **tools** (CRUD + analisis),
 
 ```
 <Obsidian Vault>/
-└── memory/                  # OBSIDIAN_MEMORY_ROOT (default: "memory")
-    ├── proyek-a/            # satu folder per project
-    │   ├── _MOC.md          # peta (Map of Content) — digenerate otomatis
-    │   ├── auth-flow.md     # satu memori = satu catatan
-    │   └── deploy-pipeline.md
-    └── proyek-b/
-        └── ...
+├── memory/                  # OBSIDIAN_MEMORY_ROOT (default: "memory")
+│   ├── proyek-a/            # satu folder per project
+│   │   ├── _MOC.md          # peta (Map of Content) — digenerate otomatis
+│   │   ├── auth-flow.md     # satu memori = satu catatan
+│   │   └── deploy-pipeline.md
+│   └── proyek-b/
+│       └── ...
+└── docs/                    # OBSIDIAN_DOCS_ROOT (default: "docs")
+    └── proyek-a/            # dokumen panjang, TERPISAH dari graf memori
+        ├── login-spec.md    # spec / runbook / brainstorm / worklog
+        └── sprint-log.md
 ```
+
+**Memori vs dokumen.** Memori adalah fakta atomik yang saling-tertaut dan ikut
+diindeks ke graf, semantic search, & `_MOC.md`. Dokumen adalah catatan panjang
+(spec, runbook, brainstorm, worklog) yang disimpan di root terpisah dan **sengaja
+tidak** diindeks — supaya teks panjang tidak mencemari kualitas pencarian & peta.
+Karena itu dokumen ditemukan lewat `doc_list`/`doc_search`, bukan semantic search.
 
 Contoh isi satu memori (`auth-flow.md`):
 
@@ -71,6 +81,18 @@ kategori (`type`), plus bagian **🔗 Relasi** (tautan keluar), **⬅️ Backlin
 | `memory_rename` | Ganti nama memori **dan** perbarui semua tautan masuk (field + `[[wikilink]]`); `created` dipertahankan |
 | `memory_delete` | Hapus satu memori (regenerasi peta otomatis) |
 
+### Dokumen (folder `docs/` terpisah, tidak terindeks ke graf)
+
+| Tool | Fungsi |
+|------|--------|
+| `doc_write` | Tulis dokumen panjang. `type` (spec/runbook/brainstorm/worklog) menentukan template awal & mode default; `mode` `overwrite`/`append` bisa dioverride |
+| `doc_append` | Tambah entri ber-timestamp ke dokumen (auto-create dari template bila belum ada) — cocok untuk worklog/brainstorm |
+| `doc_read` | Baca isi lengkap satu dokumen |
+| `doc_list` | Daftar ringkas dokumen (opsi filter `type`) — **cara utama menemukan dokumen** karena tak terindeks |
+| `doc_search` | Cari dokumen berdasarkan kata kunci (opsi filter `type`) |
+
+Mode default per `type`: `brainstorm`/`worklog` → **append**, `spec`/`runbook` → **overwrite**.
+
 Pada setiap tool, argumen `project` **opsional**. Bila kosong, project ditentukan
 berurutan dari: argumen → `OBSIDIAN_DEFAULT_PROJECT` → nama folder working
 directory tempat server dijalankan.
@@ -104,6 +126,7 @@ argumen opsional `project` (auto-detect bila kosong).
 |----------|:-----:|---------|------------|
 | `OBSIDIAN_VAULT_PATH` | ✅ | — | Path absolut ke folder Obsidian Vault |
 | `OBSIDIAN_MEMORY_ROOT` | | `memory` | Subfolder di dalam vault untuk memori |
+| `OBSIDIAN_DOCS_ROOT` | | `docs` | Subfolder di dalam vault untuk dokumen (terpisah dari memori) |
 | `OBSIDIAN_DEFAULT_PROJECT` | | — | Project default bila auto-detect gagal |
 | `RUST_LOG` | | `info` | Level log (ditulis ke stderr) |
 
@@ -199,6 +222,7 @@ ada write yang balapan & peta tidak terbaca setengah jadi.
 | `src/config.rs` | Resolusi konfigurasi & path dari environment |
 | `src/project.rs` | Slugify + deteksi project (arg → env → cwd) |
 | `src/memory.rs` | Frontmatter, CRUD memori, search |
+| `src/docs.rs` | Dokumen panjang (spec/runbook/brainstorm/worklog): write/append/read/list/search di folder terpisah |
 | `src/mapping.rs` | Generasi `_MOC.md` (relasi + backlink + tag + saran + tema) |
 | `src/similarity.rs` | Relasi pintar: skor kemiripan TF-IDF (isi) + Jaccard (tag) |
 | `src/links.rs` | Graf tautan: ekstraksi wikilink, backlink, broken link & orphan |

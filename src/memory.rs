@@ -345,6 +345,13 @@ pub fn search(
     query: Option<&str>,
     tag: Option<&str>,
 ) -> Vec<SearchHit> {
+    search_in(&load_all(config, project), query, tag)
+}
+
+/// Skoring keyword murni atas sekumpulan memori (tanpa I/O), agar bisa dipakai
+/// ulang baik oleh memori maupun dokumen. Lihat [`search`] untuk varian yang
+/// memuat dari disk.
+pub fn search_in(memories: &[Memory], query: Option<&str>, tag: Option<&str>) -> Vec<SearchHit> {
     // Pecah query jadi term per-whitespace. Mencocokkan SETIAP term secara
     // terpisah (bukan frasa utuh) agar query multi-kata seperti
     // "io_lock konkurensi" tetap cocok walau kata-katanya tak berurutan.
@@ -357,7 +364,7 @@ pub fn search(
     let tag = tag.map(slugify);
     let mut hits = Vec::new();
 
-    for mem in load_all(config, project) {
+    for mem in memories {
         let f = &mem.front;
 
         if let Some(t) = &tag {
@@ -558,6 +565,7 @@ mod tests {
         Config {
             vault_path: dir,
             memory_root: "memory".into(),
+            docs_root: "docs".into(),
             default_project: Some("test".into()),
         }
     }

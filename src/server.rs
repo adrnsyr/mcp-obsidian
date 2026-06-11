@@ -2,6 +2,7 @@
 
 use crate::cluster;
 use crate::config::Config;
+use crate::docs::{self, DocInput, WriteMode};
 use crate::embed;
 use crate::links;
 use crate::mapping::regenerate_moc;
@@ -41,7 +42,12 @@ aktif), memory_recall untuk mengambil paket konteks terpadu sebuah topik \
 (semantic + isi + graf + tema dalam satu panggilan), memory_hybrid_search untuk \
 pencarian gabungan keyword+makna, memory_link untuk menambah/menghapus tautan \
 tanpa menulis ulang body, memory_rename untuk mengganti nama memori sekaligus \
-memperbarui semua tautan masuk, dan memory_delete untuk menghapus.";
+memperbarui semua tautan masuk, dan memory_delete untuk menghapus. \
+Untuk dokumen panjang (spec/runbook/brainstorm/worklog) gunakan keluarga doc_*: \
+doc_write/doc_append untuk menulis, doc_read untuk membaca, doc_list/doc_search \
+untuk menemukan. Dokumen disimpan di folder terpisah dan SENGAJA tidak ikut \
+diindeks ke graf/semantic/MOC, jadi pakai memori untuk fakta atomik yang \
+saling-tertaut, dan dokumen untuk catatan panjang yang dibaca/diedit manusia.";
 
 #[derive(Clone)]
 pub struct ObsidianServer {
@@ -249,11 +255,106 @@ pub struct HybridSearchArgs {
     pub top: Option<usize>,
 }
 
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct DocWriteArgs {
+    /// Nama project (opsional, auto-detect bila kosong).
+    #[serde(default)]
+    pub project: Option<String>,
+    /// Nama/judul dokumen (dijadikan slug & nama file).
+    pub name: String,
+    /// Jenis dokumen: spec | runbook | brainstorm | worklog (default note).
+    /// Menentukan template awal & mode default bila 'mode' tidak diisi.
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
+    /// Judul satu baris (disimpan sebagai description). Opsional.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Isi dokumen (Markdown). Kosong pada dokumen baru → pakai template kind.
+    #[serde(default)]
+    pub body: Option<String>,
+    /// Tag untuk pengelompokan (opsional).
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    /// Mode tulis: "overwrite" atau "append". Kosong → default per-kind
+    /// (brainstorm/worklog = append, lainnya = overwrite).
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct DocAppendArgs {
+    /// Nama project (opsional, auto-detect bila kosong).
+    #[serde(default)]
+    pub project: Option<String>,
+    /// Nama/slug dokumen. Dibuat otomatis dari template bila belum ada.
+    pub name: String,
+    /// Jenis dokumen bila dokumen baru dibuat (mis. worklog). Opsional bila
+    /// dokumen sudah ada (jenis lama dipertahankan).
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
+    /// Isi yang ditambahkan (akan diberi heading ber-timestamp).
+    pub body: String,
+}
+
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct DocReadArgs {
+    /// Nama project (opsional, auto-detect bila kosong).
+    #[serde(default)]
+    pub project: Option<String>,
+    /// Nama/slug dokumen yang ingin dibaca.
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct DocListArgs {
+    /// Nama project (opsional, auto-detect bila kosong).
+    #[serde(default)]
+    pub project: Option<String>,
+    /// Filter berdasarkan jenis dokumen (opsional).
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct DocSearchArgs {
+    /// Nama project (opsional, auto-detect bila kosong).
+    #[serde(default)]
+    pub project: Option<String>,
+    /// Kata kunci pencarian (cocokkan ke name/description/tags/body).
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Filter berdasarkan jenis dokumen (opsional).
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
+}
+
 /// Ambang cosine untuk menandai dua memori sebagai near-duplicate di doctor.
 const NEAR_DUP_THRESHOLD: f32 = 0.88;
 
 fn err(e: impl std::fmt::Display) -> McpError {
     McpError::internal_error(e.to_string(), None)
+}
+
+/// Tentukan mode tulis dokumen: argumen eksplisit menang; jika kosong, pakai
+/// default per-kind (append untuk brainstorm/worklog, overwrite untuk sisanya).
+fn resolve_mode(mode: Option<&str>, kind: &str) -> anyhow::Result<WriteMode> {
+    match mode {
+        Some(m) => match m.trim().to_lowercase().as_str() {
+            "overwrite" => Ok(WriteMode::Overwrite),
+            "append" => Ok(WriteMode::Append),
+            other => {
+                anyhow::bail!("mode tidak dikenal: '{other}' (gunakan 'overwrite' atau 'append')")
+            }
+        },
+        None => Ok(docs::doc_kind(kind)
+            .map(|k| k.default_mode)
+            .unwrap_or(WriteMode::Overwrite)),
+    }
 }
 
 #[tool_router]
@@ -863,6 +964,145 @@ impl ObsidianServer {
         };
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
+
+    // ---- Dokumen (folder docs terpisah, tidak terindeks ke graf) ----
+
+    #[tool(
+        description = "Tulis dokumen panjang (spec/runbook/brainstorm/worklog/dll) \
+        ke folder docs Obsidian — TERPISAH dari memori, jadi tidak ikut diindeks \
+        ke graf/semantic/MOC. 'type' menentukan template awal & mode default. \
+        'mode' overwrite (default spec/runbook) menimpa isi; 'append' (default \
+        brainstorm/worklog) menambah entri ber-timestamp. Saat update, 'created' \
+        dipertahankan."
+    )]
+    async fn doc_write(
+        &self,
+        Parameters(args): Parameters<DocWriteArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let _guard = self.io_lock.lock().await;
+        let project = self.project_of(args.project.as_deref())?;
+        let kind = args.kind.unwrap_or_default();
+        let mode = resolve_mode(args.mode.as_deref(), &kind).map_err(err)?;
+
+        let outcome = docs::write_doc(
+            &self.config,
+            &project,
+            DocInput {
+                name: args.name,
+                title: args.title.unwrap_or_default(),
+                kind,
+                body: args.body.unwrap_or_default(),
+                tags: args.tags.unwrap_or_default(),
+            },
+            mode,
+        )
+        .map_err(err)?;
+
+        let verb = match (outcome.created, outcome.mode) {
+            (true, _) => "Dibuat",
+            (false, WriteMode::Append) => "Ditambahkan ke",
+            (false, WriteMode::Overwrite) => "Diperbarui",
+        };
+        let text = format!(
+            "{verb} dokumen '{}' di project '{}'.\nPath: {}",
+            outcome.slug,
+            project,
+            outcome.path.display()
+        );
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(description = "Tambahkan satu entri ber-timestamp ke sebuah dokumen \
+        (mis. worklog/brainstorm). Bila dokumen belum ada, dibuat otomatis dari \
+        template 'type'. Tidak menimpa isi yang ada.")]
+    async fn doc_append(
+        &self,
+        Parameters(args): Parameters<DocAppendArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let _guard = self.io_lock.lock().await;
+        let project = self.project_of(args.project.as_deref())?;
+        let outcome = docs::write_doc(
+            &self.config,
+            &project,
+            DocInput {
+                name: args.name,
+                title: String::new(),
+                kind: args.kind.unwrap_or_default(),
+                body: args.body,
+                tags: Vec::new(),
+            },
+            WriteMode::Append,
+        )
+        .map_err(err)?;
+
+        let verb = if outcome.created {
+            "Dibuat & ditambahkan ke"
+        } else {
+            "Ditambahkan ke"
+        };
+        let text = format!(
+            "{verb} dokumen '{}' di project '{}'.\nPath: {}",
+            outcome.slug,
+            project,
+            outcome.path.display()
+        );
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(description = "Baca isi lengkap satu dokumen (frontmatter + body).")]
+    async fn doc_read(
+        &self,
+        Parameters(args): Parameters<DocReadArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let _guard = self.io_lock.lock().await;
+        let project = self.project_of(args.project.as_deref())?;
+        let doc = docs::read_doc(&self.config, &project, &args.name).map_err(err)?;
+        let text = doc.to_file_string().map_err(err)?;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(
+        description = "Daftar ringkas dokumen dalam satu project (JSON), opsional \
+        difilter 'type'. Karena dokumen tidak terindeks ke semantic search, tool \
+        ini adalah cara utama menemukan dokumen yang sudah ada."
+    )]
+    async fn doc_list(
+        &self,
+        Parameters(args): Parameters<DocListArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let _guard = self.io_lock.lock().await;
+        let project = self.project_of(args.project.as_deref())?;
+        let entries = docs::list_docs(&self.config, &project, args.kind.as_deref());
+        let json = serde_json::to_string_pretty(&entries).map_err(err)?;
+        let header = format!("Project '{project}' — {} dokumen:\n", entries.len());
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{header}{json}"
+        ))]))
+    }
+
+    #[tool(
+        description = "Cari dokumen dalam satu project berdasarkan kata kunci \
+        (name/description/tags/body), opsional difilter 'type'. Hasil terurut \
+        berdasarkan relevansi (JSON)."
+    )]
+    async fn doc_search(
+        &self,
+        Parameters(args): Parameters<DocSearchArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let _guard = self.io_lock.lock().await;
+        let project = self.project_of(args.project.as_deref())?;
+        let hits = docs::search_docs(
+            &self.config,
+            &project,
+            args.query.as_deref(),
+            args.kind.as_deref(),
+        );
+        let json = serde_json::to_string_pretty(&hits).map_err(err)?;
+        let header = format!("Project '{project}' — {} hasil:\n", hits.len());
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{header}{json}"
+        ))]))
+    }
 }
 
 #[tool_handler]
@@ -1051,6 +1291,7 @@ mod tests {
         ObsidianServer::new(Config {
             vault_path: dir,
             memory_root: "memory".into(),
+            docs_root: "docs".into(),
             default_project: Some("test".into()),
         })
     }

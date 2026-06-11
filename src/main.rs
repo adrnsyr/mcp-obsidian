@@ -3,6 +3,7 @@
 
 mod cluster;
 mod config;
+mod docs;
 // Tanpa fitur `semantic`, helper index di `embed` sengaja tak terpakai
 // (hanya dipakai jalur ber-feature) — bungkam dead-code khusus build itu.
 #[cfg_attr(not(feature = "semantic"), allow(dead_code))]
@@ -37,6 +38,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         vault = %config.vault_path.display(),
         memory_root = %config.memory_root,
+        docs_root = %config.docs_root,
         "mcp-obsidian dimulai"
     );
 

@@ -129,6 +129,7 @@ mod imp {
             Config {
                 vault_path: PathBuf::from("/vault"),
                 memory_root: "memory".into(),
+                docs_root: "docs".into(),
                 default_project: None,
             }
         }

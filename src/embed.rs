@@ -407,6 +407,7 @@ mod tests {
         let cfg = Config {
             vault_path: std::env::temp_dir(),
             memory_root: "memory".into(),
+            docs_root: "docs".into(),
             default_project: None,
         };
         let res = semantic_search(&cfg, "p", "q", 5, &[]);
