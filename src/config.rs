@@ -95,6 +95,11 @@ impl Config {
     pub fn docs_file(&self, project: &str, slug: &str) -> PathBuf {
         self.docs_project_dir(project).join(format!("{slug}.md"))
     }
+
+    /// Path ke file indeks dokumen (`_DOCS.md`) sebuah project.
+    pub fn docs_index_file(&self, project: &str) -> PathBuf {
+        self.docs_project_dir(project).join("_DOCS.md")
+    }
 }
 
 /// Pastikan sebuah folder ada (buat rekursif bila belum).

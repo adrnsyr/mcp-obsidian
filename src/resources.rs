@@ -1,21 +1,30 @@
-//! Memori sebagai **MCP Resource**.
+//! Memori & dokumen sebagai **MCP Resource**.
 //!
-//! Setiap memori diekspos lewat URI `memory://<project>/<slug>` sehingga klien
-//! MCP bisa me-list dan "attach" isinya langsung sebagai konteks (tanpa harus
-//! memanggil tool). Peta project tersedia di `memory://<project>/_MOC`.
+//! Setiap memori diekspos lewat URI `memory://<project>/<slug>` (peta di
+//! `memory://<project>/_MOC`), dan setiap dokumen lewat `docs://<project>/<slug>`
+//! (indeks di `docs://<project>/_DOCS`), sehingga klien MCP bisa me-list dan
+//! "attach" isinya langsung sebagai konteks tanpa memanggil tool.
 //!
 //! Modul ini hanya menangani konstruksi & parsing URI; pembacaan file dilakukan
 //! oleh pemanggil (server) lewat `Config`.
 
-/// Skema URI resource.
+/// Skema URI resource memori.
 pub const SCHEME: &str = "memory://";
 
-/// MIME type untuk seluruh resource memori.
+/// Skema URI resource dokumen.
+pub const DOCS_SCHEME: &str = "docs://";
+
+/// MIME type untuk seluruh resource (memori & dokumen).
 pub const MIME_MARKDOWN: &str = "text/markdown";
 
 /// Bangun URI resource untuk sebuah memori (atau `_MOC`).
 pub fn uri_for(project: &str, slug: &str) -> String {
     format!("{SCHEME}{project}/{slug}")
+}
+
+/// Bangun URI resource untuk sebuah dokumen (atau `_DOCS`).
+pub fn docs_uri_for(project: &str, slug: &str) -> String {
+    format!("{DOCS_SCHEME}{project}/{slug}")
 }
 
 /// Hasil parse URI: project + slug.
@@ -26,12 +35,19 @@ pub struct ResourceRef {
 }
 
 /// Parse `memory://<project>/<slug>` menjadi `(project, slug)`.
-///
-/// Mengembalikan `None` bila skema salah, atau project/slug kosong. Slug boleh
-/// memuat `/`? Tidak — nama memori adalah slug datar, jadi hanya split pertama
-/// yang dipakai sebagai project dan sisanya sebagai slug (tanpa `/`).
 pub fn parse_uri(uri: &str) -> Option<ResourceRef> {
-    let rest = uri.strip_prefix(SCHEME)?;
+    parse_scheme(uri, SCHEME)
+}
+
+/// Parse `docs://<project>/<slug>` menjadi `(project, slug)`.
+pub fn parse_docs_uri(uri: &str) -> Option<ResourceRef> {
+    parse_scheme(uri, DOCS_SCHEME)
+}
+
+/// Parse `<scheme><project>/<slug>`. Mengembalikan `None` bila skema salah, atau
+/// project/slug kosong. Slug adalah nama datar — tak boleh memuat `/`.
+fn parse_scheme(uri: &str, scheme: &str) -> Option<ResourceRef> {
+    let rest = uri.strip_prefix(scheme)?;
     let (project, slug) = rest.split_once('/')?;
     if project.is_empty() || slug.is_empty() || slug.contains('/') {
         return None;
@@ -77,5 +93,32 @@ mod tests {
                 slug: "_MOC".into()
             })
         );
+    }
+
+    #[test]
+    fn docs_roundtrip_uri() {
+        let uri = docs_uri_for("demo", "login-spec");
+        assert_eq!(uri, "docs://demo/login-spec");
+        assert_eq!(
+            parse_docs_uri(&uri),
+            Some(ResourceRef {
+                project: "demo".into(),
+                slug: "login-spec".into()
+            })
+        );
+        // indeks dokumen
+        assert_eq!(
+            parse_docs_uri("docs://demo/_DOCS"),
+            Some(ResourceRef {
+                project: "demo".into(),
+                slug: "_DOCS".into()
+            })
+        );
+    }
+
+    #[test]
+    fn schemes_do_not_cross_parse() {
+        assert!(parse_docs_uri("memory://demo/x").is_none());
+        assert!(parse_uri("docs://demo/x").is_none());
     }
 }

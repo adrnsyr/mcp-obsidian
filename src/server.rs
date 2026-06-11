@@ -1020,6 +1020,7 @@ impl ObsidianServer {
             mode,
         )
         .map_err(err)?;
+        docs::regenerate_docs_index(&self.config, &project).map_err(err)?;
 
         let verb = match (outcome.created, outcome.mode) {
             (true, _) => "Dibuat",
@@ -1057,6 +1058,7 @@ impl ObsidianServer {
             WriteMode::Append,
         )
         .map_err(err)?;
+        docs::regenerate_docs_index(&self.config, &project).map_err(err)?;
 
         let verb = if outcome.created {
             "Dibuat & ditambahkan ke"
@@ -1135,6 +1137,9 @@ impl ObsidianServer {
         let _guard = self.io_lock.lock().await;
         let project = self.project_of(args.project.as_deref())?;
         let removed = docs::delete_doc(&self.config, &project, &args.name).map_err(err)?;
+        if removed {
+            docs::regenerate_docs_index(&self.config, &project).map_err(err)?;
+        }
         let text = if removed {
             format!(
                 "Dokumen '{}' dihapus dari project '{}'.",
@@ -1160,6 +1165,7 @@ impl ObsidianServer {
         let project = self.project_of(args.project.as_deref())?;
         let out =
             docs::rename_doc(&self.config, &project, &args.name, &args.new_name).map_err(err)?;
+        docs::regenerate_docs_index(&self.config, &project).map_err(err)?;
         let text = format!(
             "Dokumen '{}' diganti nama menjadi '{}' di project '{}'.",
             out.old_slug, out.new_slug, project
@@ -1189,7 +1195,8 @@ impl ServerHandler for ObsidianServer {
         info
     }
 
-    // ---- Resources: tiap memori = resource `memory://<project>/<slug>` ----
+    // ---- Resources: memori = `memory://<project>/<slug>`,
+    //                 dokumen = `docs://<project>/<slug>` ----
 
     async fn list_resources(
         &self,
@@ -1222,6 +1229,36 @@ impl ServerHandler for ObsidianServer {
                 );
             }
         }
+
+        // Resource dokumen: indeks `_DOCS` + tiap dokumen per project. Project
+        // docs dienumerasi terpisah karena bisa berbeda dari project memori.
+        for project in project::list_doc_projects(&self.config) {
+            let entries = docs::list_docs(&self.config, &project, None);
+            if entries.is_empty() {
+                continue;
+            }
+            out.push(
+                RawResource::new(
+                    resources::docs_uri_for(&project, "_DOCS"),
+                    format!("{project} / indeks dokumen"),
+                )
+                .with_description(format!("Indeks dokumen project {project}"))
+                .with_mime_type(resources::MIME_MARKDOWN)
+                .no_annotation(),
+            );
+            for entry in entries {
+                out.push(
+                    RawResource::new(
+                        resources::docs_uri_for(&project, &entry.name),
+                        format!("{project} / doc / {}", entry.name),
+                    )
+                    .with_description(entry.description)
+                    .with_mime_type(resources::MIME_MARKDOWN)
+                    .no_annotation(),
+                );
+            }
+        }
+
         let result = ListResourcesResult {
             resources: out,
             ..Default::default()
@@ -1235,18 +1272,37 @@ impl ServerHandler for ObsidianServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
         let _guard = self.io_lock.lock().await;
-        let r = resources::parse_uri(&request.uri).ok_or_else(|| {
-            McpError::invalid_params(format!("URI resource tidak valid: {}", request.uri), None)
-        })?;
 
-        // `_MOC` dibaca dari file peta; selain itu baca file memori biasa.
-        let text = if r.slug == "_MOC" {
-            std::fs::read_to_string(self.config.moc_file(&r.project)).map_err(|e| {
-                McpError::invalid_params(format!("peta '{}' tidak ditemukan: {e}", r.project), None)
-            })?
+        // Skema `memory://` → memori/peta; `docs://` → dokumen/indeks.
+        let text = if let Some(r) = resources::parse_uri(&request.uri) {
+            if r.slug == "_MOC" {
+                std::fs::read_to_string(self.config.moc_file(&r.project)).map_err(|e| {
+                    McpError::invalid_params(
+                        format!("peta '{}' tidak ditemukan: {e}", r.project),
+                        None,
+                    )
+                })?
+            } else {
+                let mem = memory::read_memory(&self.config, &r.project, &r.slug).map_err(err)?;
+                mem.to_file_string().map_err(err)?
+            }
+        } else if let Some(r) = resources::parse_docs_uri(&request.uri) {
+            if r.slug == "_DOCS" {
+                std::fs::read_to_string(self.config.docs_index_file(&r.project)).map_err(|e| {
+                    McpError::invalid_params(
+                        format!("indeks dokumen '{}' tidak ditemukan: {e}", r.project),
+                        None,
+                    )
+                })?
+            } else {
+                let doc = docs::read_doc(&self.config, &r.project, &r.slug).map_err(err)?;
+                doc.to_file_string().map_err(err)?
+            }
         } else {
-            let mem = memory::read_memory(&self.config, &r.project, &r.slug).map_err(err)?;
-            mem.to_file_string().map_err(err)?
+            return Err(McpError::invalid_params(
+                format!("URI resource tidak valid: {}", request.uri),
+                None,
+            ));
         };
 
         Ok(ReadResourceResult::new(vec![ResourceContents::text(

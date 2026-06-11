@@ -66,9 +66,18 @@ pub fn resolve_project(config: &Config, explicit: Option<&str>) -> anyhow::Resul
 
 /// Daftar semua project yang punya folder memori.
 pub fn list_projects(config: &Config) -> Vec<String> {
-    let dir = config.memory_dir();
+    list_dirs_in(&config.memory_dir())
+}
+
+/// Daftar semua project yang punya folder dokumen.
+pub fn list_doc_projects(config: &Config) -> Vec<String> {
+    list_dirs_in(&config.docs_dir())
+}
+
+/// Nama subfolder (terurut) di dalam sebuah direktori; kosong bila tak ada.
+fn list_dirs_in(dir: &std::path::Path) -> Vec<String> {
     let mut projects = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&dir) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             if entry.path().is_dir() {
                 if let Some(name) = entry.file_name().to_str() {

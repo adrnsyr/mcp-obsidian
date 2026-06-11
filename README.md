@@ -27,6 +27,7 @@ Server mengekspos ketiga kapabilitas MCP: **tools** (CRUD + analisis),
 │       └── ...
 └── docs/                    # OBSIDIAN_DOCS_ROOT (default: "docs")
     └── proyek-a/            # dokumen panjang, TERPISAH dari graf memori
+        ├── _DOCS.md         # indeks dokumen — digenerate otomatis
         ├── login-spec.md    # spec / runbook / brainstorm / worklog
         └── sprint-log.md
 ```
@@ -101,15 +102,18 @@ directory tempat server dijalankan.
 
 ## Resources
 
-Tiap memori diekspos sebagai MCP **resource** ber-URI, sehingga klien bisa
-me-list dan "attach" isinya langsung sebagai konteks tanpa memanggil tool.
+Memori **dan** dokumen diekspos sebagai MCP **resource** ber-URI, sehingga klien
+bisa me-list dan "attach" isinya langsung sebagai konteks tanpa memanggil tool.
 
 | URI | Isi |
 |-----|-----|
 | `memory://<project>/<slug>` | Satu memori (frontmatter + body) |
 | `memory://<project>/_MOC` | Peta (Map of Content) project |
+| `docs://<project>/<slug>` | Satu dokumen (frontmatter + body) |
+| `docs://<project>/_DOCS` | Indeks dokumen project (digenerate otomatis) |
 
 MIME type: `text/markdown`. Lihat lewat `resources/list` & `resources/read`.
+Indeks `_DOCS.md` diregenerasi otomatis setiap `doc_write`/`doc_append`/`doc_rename`/`doc_delete`.
 
 ## Prompts
 

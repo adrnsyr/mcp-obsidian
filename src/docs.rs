@@ -13,6 +13,7 @@
 use crate::config::{ensure_dir, Config};
 use crate::memory::{now_rfc3339, search_in, Frontmatter, Memory, MemoryEntry, SearchHit};
 use crate::project::slugify;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Kind default bila tidak ditentukan & bukan salah satu template dikenal.
@@ -315,6 +316,65 @@ pub fn search_docs(
     search_in(&docs, query, None)
 }
 
+/// Bangun isi teks `_DOCS.md` (indeks dokumen) untuk sebuah project.
+/// Dikelompokkan per `type`, tiap entri = wikilink + deskripsi + waktu update.
+pub fn build_docs_index_string(project: &str, docs: &[Memory]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# 📄 Indeks Dokumen — `{project}`\n\n"));
+    out.push_str(&format!(
+        "> Dihasilkan otomatis oleh mcp-obsidian pada {}. \
+         Jangan diedit manual — perubahan akan ditimpa.\n\n",
+        now_rfc3339()
+    ));
+
+    if docs.is_empty() {
+        out.push_str("_Belum ada dokumen untuk project ini._\n");
+        return out;
+    }
+
+    out.push_str(&format!("Total dokumen: **{}**\n\n", docs.len()));
+
+    let mut by_kind: BTreeMap<String, Vec<&Memory>> = BTreeMap::new();
+    for d in docs {
+        by_kind.entry(d.front.kind.clone()).or_default().push(d);
+    }
+    for (kind, items) in &by_kind {
+        out.push_str(&format!("## {}\n\n", title_case(kind)));
+        for d in items {
+            let f = &d.front;
+            let desc = if f.description.is_empty() {
+                String::new()
+            } else {
+                format!(" — {}", f.description)
+            };
+            out.push_str(&format!(
+                "- [[{}]]{}  _(diperbarui {})_\n",
+                f.name, desc, f.updated
+            ));
+        }
+        out.push('\n');
+    }
+
+    out
+}
+
+/// Regenerasi `_DOCS.md` di disk untuk sebuah project. Mengembalikan isi teks.
+pub fn regenerate_docs_index(config: &Config, project: &str) -> anyhow::Result<String> {
+    let docs = load_all_docs(config, project);
+    let content = build_docs_index_string(project, &docs);
+    ensure_dir(&config.docs_project_dir(project))?;
+    std::fs::write(config.docs_index_file(project), &content)?;
+    Ok(content)
+}
+
+fn title_case(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 fn is_doc_file(path: &Path) -> bool {
     if path.extension().and_then(|e| e.to_str()) != Some("md") {
         return false;
@@ -537,6 +597,48 @@ mod tests {
         assert!(rename_doc(&cfg, "p", "A", "B").is_err());
         // A tetap utuh setelah rename gagal
         assert_eq!(read_doc(&cfg, "p", "a").unwrap().body, "a");
+    }
+
+    #[test]
+    fn index_groups_by_kind_and_excludes_itself() {
+        let cfg = tmp_config();
+        write_doc(
+            &cfg,
+            "p",
+            input("A", "spec", "Spec A", "x"),
+            WriteMode::Overwrite,
+        )
+        .unwrap();
+        write_doc(
+            &cfg,
+            "p",
+            input("B", "runbook", "RB B", "y"),
+            WriteMode::Overwrite,
+        )
+        .unwrap();
+
+        let content = regenerate_docs_index(&cfg, "p").unwrap();
+        assert!(content.contains("Total dokumen: **2**"));
+        assert!(content.contains("## Spec"));
+        assert!(content.contains("## Runbook"));
+        assert!(content.contains("[[a]]"));
+        assert!(content.contains("[[b]]"));
+
+        // File _DOCS.md ada di disk tapi TIDAK ikut terbaca sebagai dokumen.
+        assert!(cfg.docs_index_file("p").exists());
+        let entries = list_docs(&cfg, "p", None);
+        assert_eq!(
+            entries.len(),
+            2,
+            "_DOCS.md tidak boleh dihitung sebagai dokumen"
+        );
+    }
+
+    #[test]
+    fn index_empty_project_is_graceful() {
+        let cfg = tmp_config();
+        let content = regenerate_docs_index(&cfg, "kosong").unwrap();
+        assert!(content.contains("Belum ada dokumen"));
     }
 
     #[test]
