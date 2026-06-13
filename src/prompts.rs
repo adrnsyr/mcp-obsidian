@@ -1,115 +1,115 @@
-//! Katalog **MCP Prompt** siap-pakai untuk bekerja dengan memori.
+//! A ready-to-use **MCP Prompt** catalog for working with memories.
 //!
-//! Prompt adalah template instruksi yang bisa dipilih pengguna di klien MCP.
-//! Modul ini mendefinisikan katalog (nama, deskripsi, argumen) dan merender
-//! teks pesan berdasarkan isi memori yang relevan. Logika pembacaan memori
-//! diberikan oleh pemanggil (server) lewat closure/data, agar modul ini murni.
+//! A prompt is an instruction template the user can select in their MCP client.
+//! This module defines the catalog (name, description, arguments) and renders the
+//! message text based on the relevant memory contents. The memory-reading logic is
+//! provided by the caller (the server) via closures/data, keeping this module pure.
 
-/// Identitas prompt yang dikenal server.
+/// Identities of the prompts known to the server.
 pub mod names {
     pub const SUMMARIZE_PROJECT: &str = "summarize-project";
     pub const REVIEW_DECISIONS: &str = "review-decisions";
     pub const ONBOARD: &str = "onboard";
 }
 
-/// Metadata satu prompt untuk ditampilkan di `list_prompts`.
+/// Metadata for a single prompt, shown in `list_prompts`.
 pub struct PromptSpec {
     pub name: &'static str,
     pub description: &'static str,
-    /// (nama_argumen, deskripsi, required)
+    /// (argument_name, description, required)
     pub arguments: &'static [(&'static str, &'static str, bool)],
 }
 
-/// Katalog seluruh prompt yang didukung.
+/// Catalog of all supported prompts.
 pub const CATALOG: &[PromptSpec] = &[
     PromptSpec {
         name: names::SUMMARIZE_PROJECT,
-        description: "Rangkum semua memori sebuah project menjadi ikhtisar singkat.",
+        description: "Summarize all of a project's memories into a brief overview.",
         arguments: &[(
             "project",
-            "Nama project (opsional; auto-detect bila kosong).",
+            "Project name (optional; auto-detected if empty).",
             false,
         )],
     },
     PromptSpec {
         name: names::REVIEW_DECISIONS,
-        description: "Tinjau semua memori bertipe 'decision' dan nilai apakah masih relevan.",
+        description:
+            "Review all memories of type 'decision' and assess whether they are still relevant.",
         arguments: &[(
             "project",
-            "Nama project (opsional; auto-detect bila kosong).",
+            "Project name (optional; auto-detected if empty).",
             false,
         )],
     },
     PromptSpec {
         name: names::ONBOARD,
-        description: "Jelaskan project ini kepada anggota baru berdasarkan memori yang ada.",
+        description: "Explain this project to a new member based on the existing memories.",
         arguments: &[(
             "project",
-            "Nama project (opsional; auto-detect bila kosong).",
+            "Project name (optional; auto-detected if empty).",
             false,
         )],
     },
 ];
 
-/// Ringkasan satu memori untuk dirender ke dalam teks prompt.
+/// A summary of a single memory to render into the prompt text.
 pub struct MemoryBrief {
     pub name: String,
     pub kind: String,
     pub description: String,
 }
 
-/// Render isi pesan prompt `summarize-project`.
+/// Render the message body of the `summarize-project` prompt.
 pub fn render_summarize(project: &str, mems: &[MemoryBrief]) -> String {
     let mut s = format!(
-        "Kamu sedang meninjau basis memori project \"{project}\". \
-         Berikut daftar memori (judul — tipe — deskripsi):\n\n"
+        "You are reviewing the memory base of the project \"{project}\". \
+         Here is the list of memories (title — type — description):\n\n"
     );
     append_list(&mut s, mems);
     s.push_str(
-        "\nTugas: tulis ikhtisar singkat (3–6 kalimat) yang menjelaskan project ini, \
-         tema-tema utamanya, dan keputusan penting yang sudah diambil. Akhiri dengan \
-         daftar 'hal yang masih perlu diperjelas' bila ada.",
+        "\nTask: write a brief overview (3–6 sentences) describing this project, \
+         its main themes, and the important decisions that have been made. End with \
+         a list of 'things that still need clarification' if any.",
     );
     s
 }
 
-/// Render isi pesan prompt `review-decisions`.
+/// Render the message body of the `review-decisions` prompt.
 pub fn render_review_decisions(project: &str, decisions: &[MemoryBrief]) -> String {
     if decisions.is_empty() {
         return format!(
-            "Project \"{project}\" belum punya memori bertipe 'decision'. \
-             Sarankan keputusan apa saja yang sebaiknya didokumentasikan \
-             berdasarkan konteks yang kamu tahu."
+            "Project \"{project}\" has no memories of type 'decision'. \
+             Suggest which decisions should be documented \
+             based on the context you are aware of."
         );
     }
-    let mut s =
-        format!("Tinjau keputusan-keputusan (type=decision) pada project \"{project}\":\n\n");
+    let mut s = format!("Review the decisions (type=decision) in the project \"{project}\":\n\n");
     append_list(&mut s, decisions);
     s.push_str(
-        "\nUntuk tiap keputusan: nilai apakah (a) masih relevan, (b) perlu ditinjau ulang, \
-         atau (c) sudah usang. Beri alasan singkat dan rekomendasi tindak lanjut.",
+        "\nFor each decision: assess whether it is (a) still relevant, (b) needs to be reviewed again, \
+         or (c) is now obsolete. Give a brief rationale and a follow-up recommendation.",
     );
     s
 }
 
-/// Render isi pesan prompt `onboard`.
+/// Render the message body of the `onboard` prompt.
 pub fn render_onboard(project: &str, mems: &[MemoryBrief]) -> String {
     let mut s = format!(
-        "Seorang anggota baru bergabung ke project \"{project}\". \
-         Berikut memori yang tersedia:\n\n"
+        "A new member is joining the project \"{project}\". \
+         Here are the available memories:\n\n"
     );
     append_list(&mut s, mems);
     s.push_str(
-        "\nTugas: tulis penjelasan onboarding yang ramah pemula — mulai dari gambaran besar, \
-         lalu komponen penting, lalu di mana mereka bisa mulai berkontribusi. \
-         Rujuk memori terkait dengan menyebut judulnya.",
+        "\nTask: write a beginner-friendly onboarding explanation — start with the big picture, \
+         then the important components, then where they can start contributing. \
+         Reference related memories by mentioning their titles.",
     );
     s
 }
 
 fn append_list(s: &mut String, mems: &[MemoryBrief]) {
     if mems.is_empty() {
-        s.push_str("_(belum ada memori)_\n");
+        s.push_str("_(no memories yet)_\n");
         return;
     }
     for m in mems {
@@ -126,12 +126,12 @@ mod tests {
             MemoryBrief {
                 name: "auth-flow".into(),
                 kind: "project".into(),
-                description: "autentikasi".into(),
+                description: "authentication".into(),
             },
             MemoryBrief {
                 name: "pakai-rust".into(),
                 kind: "decision".into(),
-                description: "kenapa rust".into(),
+                description: "why rust".into(),
             },
         ]
     }
@@ -153,6 +153,6 @@ mod tests {
     #[test]
     fn review_decisions_handles_empty() {
         let out = render_review_decisions("demo", &[]);
-        assert!(out.contains("belum punya memori bertipe 'decision'"));
+        assert!(out.contains("has no memories of type 'decision'"));
     }
 }

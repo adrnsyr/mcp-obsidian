@@ -1,54 +1,55 @@
-# Semantic Search — Catatan & Dokumentasi
+# Semantic Search — Notes & Documentation
 
-Catatan lengkap soal fitur **pencarian semantik** di `mcp-obsidian`: apa, kenapa,
-cara kerja, keputusan desain, hasil uji nyata, dan cara memakainya.
+Complete notes on the **semantic search** feature in `mcp-obsidian`: what it is, why
+it matters, how it works, the design decisions, real test results, and how to use it.
 
-> Status: fitur ini hidup di branch **`feature/semantic-search`**, terpisah dari
-> `master`. Bersifat **opt-in** lewat cargo feature `semantic`.
+> Status: this feature is now **merged into `main`**, and is **opt-in** via the
+> `semantic` cargo feature. This document holds the in-depth design notes — for a
+> usage summary see the "Semantic search" section in the [README](README.md).
 
 ---
 
-## 1. Apa itu & kenapa perlu
+## 1. What it is & why it's needed
 
-Pencarian bawaan (`memory_search`) adalah **keyword search** — mencocokkan
-**kata yang sama persis**. Ia buta terhadap makna.
+The built-in search (`memory_search`) is a **keyword search** — it matches **exactly
+the same words**. It is blind to meaning.
 
-Contoh nyata di vault uji: ada memori `keputusan-rust` berisi *"Kenapa pakai Rust
-untuk MCP server"*.
+A real example from the test vault: there is a memory `keputusan-rust` containing *"Why
+use Rust for the MCP server"*.
 
 ```
-memory_search "alasan memilih bahasa"   →  0 hasil   ❌  (tak ada kata yang persis)
+memory_search "alasan memilih bahasa"   →  0 results   ❌  (no exact word match)
 ```
 
-**Semantic search** mencari berdasarkan **makna**, bukan kata:
+**Semantic search** finds results based on **meaning**, not words:
 
 ```
 memory_semantic_search "alasan memilih bahasa pemrograman"
-    →  keputusan-rust  (skor 0.355, peringkat #1)   ✅
+    →  keputusan-rust  (score 0.355, rank #1)   ✅
 ```
 
-Ini mengubah server dari "grep berstruktur" menjadi sistem memori yang terasa
-"mengerti" — fondasi untuk recall yang baik oleh AI agent.
+This turns the server from a "structured grep" into a memory system that feels like it
+"understands" — the foundation for good recall by an AI agent.
 
 ---
 
-## 2. Cara kerja
+## 2. How it works
 
 ### Embedding
-Sebuah model AI kecil mengubah teks jadi **vektor** (deretan angka, 384 dimensi).
-Sifat kuncinya: teks yang **maknanya mirip** menghasilkan vektor yang
-**berdekatan**. Pencarian = ubah query jadi vektor, lalu cari memori yang
-vektornya paling dekat.
+A small AI model turns text into a **vector** (a sequence of numbers, 384 dimensions).
+Its key property: text with **similar meaning** produces vectors that are **close
+together**. Searching = turn the query into a vector, then find the memory whose vector
+is closest.
 
 ### Pipeline (`src/embed.rs`)
-1. Teks tiap memori = `name + description + body`.
-2. Di-embed dengan **candle** (pure-Rust) memakai model BERT.
-3. **Masked mean-pooling** atas token (abaikan padding) → satu vektor per memori.
-4. **L2-normalize** → panjang vektor = 1, sehingga cosine similarity = dot product.
-5. Skor relevansi query↔memori = cosine; hasil diurutkan menurun.
+1. The text of each memory = `name + description + body`.
+2. Embedded with **candle** (pure-Rust) using a BERT model.
+3. **Masked mean-pooling** over the tokens (ignoring padding) → one vector per memory.
+4. **L2-normalize** → vector length = 1, so cosine similarity = dot product.
+5. The query↔memory relevance score = cosine; results are sorted in descending order.
 
 ### Index sidecar (cache)
-Meng-embed itu mahal, jadi vektor disimpan di
+Embedding is expensive, so vectors are stored in
 `memory/<project>/.embeddings.json`:
 
 ```jsonc
@@ -61,113 +62,114 @@ Meng-embed itu mahal, jadi vektor disimpan di
 }
 ```
 
-- Tiap entri menyimpan **hash isi** (FNV-1a). Saat search, hanya memori yang
-  **berubah** (hash beda) atau **baru** yang di-embed ulang; sisanya dipakai dari
-  cache → search berikutnya cepat.
-- Memori yang sudah dihapus otomatis dibuang dari index.
-- Bila `model` atau `dim` di file beda dengan yang dipakai sekarang, **seluruh
-  index dibuang & dibangun ulang** (lihat `EmbeddingIndex::load`). Inilah yang
-  membuat ganti model otomatis aman.
-- File ini **cache murni** — aman dihapus, akan dibangun ulang. Tidak dianggap
-  memori (namanya diawali `.`, bukan `.md`).
+- Each entry stores a **content hash** (FNV-1a). On a search, only memories that have
+  **changed** (different hash) or are **new** are re-embedded; the rest are reused from
+  the cache → subsequent searches are fast.
+- Memories that have been deleted are automatically dropped from the index.
+- If the `model` or `dim` in the file differs from the one currently in use, **the
+  entire index is discarded & rebuilt** (see `EmbeddingIndex::load`). This is what makes
+  switching models automatically safe.
+- This file is **pure cache** — safe to delete, it will be rebuilt. It is not treated as
+  a memory (its name starts with `.`, not `.md`).
 
 ---
 
-## 3. Keputusan desain (dan alasannya)
+## 3. Design decisions (and the reasoning)
 
-| Keputusan | Pilihan | Alasan |
+| Decision | Choice | Reason |
 |-----------|---------|--------|
-| Backend | **candle** (pure-Rust) | Setia ke ethos "binary tunggal & offline". Tak menarik ONNX/native seperti `fastembed`. |
-| Integrasi | **opt-in `--features semantic`** | Build default tetap ringan & offline; yang tak butuh tak menanggung dependency berat. |
-| Penyimpanan | **sidecar `.embeddings.json`** | Vault tetap bersih (file `.md` tak tersentuh); cache cepat & bisa dibuang. |
-| Model | **multilingual** (lihat §4) | Memori bisa non-Inggris. |
+| Backend | **candle** (pure-Rust) | Stays true to the "single binary & offline" ethos. No ONNX/native pull-in like `fastembed`. |
+| Integration | **opt-in `--features semantic`** | The default build stays lightweight & offline; those who don't need it don't pay for a heavy dependency. |
+| Storage | **sidecar `.embeddings.json`** | The vault stays clean (`.md` files are untouched); the cache is fast and disposable. |
+| Model | **multilingual** (see §4) | Memories may be non-English. |
 
-Tanpa feature `semantic`, tool `memory_semantic_search` **tetap terdaftar** tapi
-mengembalikan pesan ramah yang menjelaskan cara mengaktifkannya.
+Without the `semantic` feature, the `memory_semantic_search` tool **is still
+registered** but returns a friendly message explaining how to enable it.
 
 ---
 
-## 4. Pelajaran penting: model harus multilingual
+## 4. Key lesson: the model must be multilingual
 
-Versi pertama memakai **`all-MiniLM-L6-v2`** — model **bahasa Inggris**. Karena
-memori uji berbahasa Indonesia, hasilnya **noise** (ranking nyaris acak):
+The first version used **`all-MiniLM-L6-v2`** — an **English** model. Because the test
+memories were in Indonesian, the results were **noise** (nearly random ranking):
 
-**Query "alasan memilih bahasa pemrograman" — model Inggris (SALAH):**
+**Query "alasan memilih bahasa pemrograman" — English model (WRONG):**
 ```
-#1  0.542  catatan-rapat     ← agenda rapat, TAK relevan, malah teratas
+#1  0.542  catatan-rapat     ← meeting agenda, NOT relevant, yet ranked top
 ...
-#5  0.161  keputusan-rust    ← jawaban benar, malah PALING BAWAH
+#5  0.161  keputusan-rust    ← the correct answer, yet ranked LAST
 ```
 
-Diganti ke **`paraphrase-multilingual-MiniLM-L12-v2`** (50+ bahasa, 384 dim,
-arsitektur BERT sama → drop-in). Hasilnya terbalik dan benar:
+Switched to **`paraphrase-multilingual-MiniLM-L12-v2`** (50+ languages, 384 dim, same
+BERT architecture → drop-in). The results flipped and became correct:
 
-**Query yang sama — model multilingual (BENAR):**
+**Same query — multilingual model (CORRECT):**
 ```
-#1  0.355  keputusan-rust     ← naik dari terbawah ke #1
+#1  0.355  keputusan-rust     ← rose from last to #1
 #2  0.329  arsitektur-server
-#4  0.071  catatan-rapat      ← turun dari #1 ke #4
+#4  0.071  catatan-rapat      ← dropped from #1 to #4
 ```
 
-**Catatan jujur soal uji kedua.** Query *"cara kerja autentikasi dan login
-pengguna"* memberi `relasi-pintar` (#1, 0.437) — bukan jawaban yang jelas. Tapi
-ini **wajar**: vault uji tidak punya memori soal autentikasi sama sekali, jadi
-tak ada yang benar untuk ditemukan. Skornya rendah merata (semua < 0.44), yang
-justru sinyal sehat — model tidak memaksakan kecocokan palsu.
+**An honest note about the second test.** The query *"cara kerja autentikasi dan login
+pengguna"* returned `relasi-pintar` (#1, 0.437) — not a clearly correct answer. But this
+is **expected**: the test vault has no memory about authentication at all, so there is
+nothing correct to find. The scores are uniformly low (all < 0.44), which is actually a
+healthy signal — the model isn't forcing a false match.
 
-> Pelajaran: untuk korpus non-Inggris, **wajib** model multilingual. Mengganti
-> `MODEL_ID` di `src/embed.rs` otomatis meng-invalidasi semua index lama.
+> Lesson: for a non-English corpus, a multilingual model is **mandatory**. Changing
+> `MODEL_ID` in `src/embed.rs` automatically invalidates all old indexes.
 
 ---
 
-## 5. Cara pakai
+## 5. How to use it
 
-### Build (dengan fitur semantik)
+### Build (with the semantic feature)
 ```bash
 cargo build --release --features semantic
 ```
-Saat dipakai pertama kali, model (~470 MB) diunduh sekali ke cache HuggingFace
-(`~/.cache/huggingface`), lalu berjalan **offline**.
+On first use, the model (~470 MB) is downloaded once into the HuggingFace cache
+(`~/.cache/huggingface`), then runs **offline**.
 
-### Memanggil tool
+### Calling the tool
 ```jsonc
 {"name": "memory_semantic_search",
  "arguments": {"project": "demo", "query": "kenapa pilih arsitektur ini", "top": 5}}
 ```
 
-Argumen:
-- `project` (opsional) — auto-detect dari working dir bila kosong.
-- `query` (wajib) — kueri bahasa alami.
-- `top` (opsional, default 5) — jumlah hasil.
+Arguments:
+- `project` (optional) — auto-detected from the working dir if omitted.
+- `query` (required) — a natural-language query.
+- `top` (optional, default 5) — the number of results.
 
-Hasil: daftar `{name, description, score}` terurut dari paling relevan. `score`
-adalah cosine similarity (−1..1); makin tinggi makin relevan.
+Result: a list of `{name, description, score}` sorted from most relevant. `score` is the
+cosine similarity (−1..1); the higher, the more relevant.
 
 ---
 
-## 6. Catatan teknis (untuk pengembang)
+## 6. Technical notes (for developers)
 
-- **API candle 0.10.2**: `candle_transformers::models::bert::{BertModel, Config,
+- **candle 0.10.2 API**: `candle_transformers::models::bert::{BertModel, Config,
   DTYPE}`; `VarBuilder::from_mmaped_safetensors` (unsafe, mmap);
-  `model.forward(input_ids, token_type_ids, Some(&attention_mask))` (3 argumen di
-  versi ini); ekstraksi hasil via `tensor.to_vec2::<f32>()`.
-- **candle itu pure-Rust** — tidak memakai ONNX Runtime (itu `fastembed`).
-- **Embedder global**: model dimuat **sekali** (lazy `static Mutex<Option<...>>`)
-  lalu dipakai berulang — pemuatan model mahal, inferensi sesudahnya murah.
-- **Blocking**: inferensi candle sinkron/CPU-bound. Saat ini dijalankan di dalam
-  `io_lock` guard server (cukup untuk beban single-user). Bila perlu paralel,
-  pindahkan ke `tokio::task::spawn_blocking`.
-- **Test**: build default tetap **27 test, 0 warning** (3 test embed: hash,
-  cosine, error-tanpa-feature). Build `--features semantic`: **26 test, 0
-  warning**. Helper index diberi `#[cfg_attr(not(feature="semantic"),
-  allow(dead_code))]` agar build default bersih.
+  `model.forward(input_ids, token_type_ids, Some(&attention_mask))` (3 arguments in this
+  version); extract the result via `tensor.to_vec2::<f32>()`.
+- **candle is pure-Rust** — it does not use the ONNX Runtime (that's `fastembed`).
+- **Global embedder**: the model is loaded **once** (lazy `static Mutex<Option<...>>`)
+  then reused repeatedly — loading the model is expensive, inference afterwards is cheap.
+- **Blocking**: candle inference is synchronous/CPU-bound. It currently runs inside the
+  server's `io_lock` guard (sufficient for single-user load). If parallelism is needed,
+  move it to `tokio::task::spawn_blocking`.
+- **Tests**: the default build stays at **27 tests, 0 warnings** (3 embed tests: hash,
+  cosine, error-without-feature). The `--features semantic` build: **26 tests, 0
+  warnings**. The index helper is given `#[cfg_attr(not(feature="semantic"),
+  allow(dead_code))]` to keep the default build clean.
 
 ---
 
-## 7. Ide pengembangan lanjutan
+## 7. Future work / further development ideas
 
-- Naikkan `memory_suggest` & `memory_cluster` agar memakai vektor embedding
-  (bukan TF-IDF) → relasi & tema berbasis makna.
-- Tool `recall` terpadu: semantic search → ambil top-K → sertakan tetangga graf
-  & tema → satu payload konteks siap pakai untuk agent.
-- Pencarian semantik **lintas-project**.
+- ✅ **Already implemented** — Upgrade `memory_suggest` & `memory_cluster` to use
+  embedding vectors (instead of TF-IDF) → meaning-based relations & themes.
+- ✅ **Already implemented** — A unified `memory_recall` tool: semantic search → take
+  the top-K → include graph neighbors & themes → a single, ready-to-use context payload
+  for the agent.
+- **Cross-project** semantic search.

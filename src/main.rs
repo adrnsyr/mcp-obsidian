@@ -1,10 +1,11 @@
-//! mcp-obsidian — MCP server untuk menulis, membaca, dan memetakan memori
-//! per-project ke dalam sebuah Obsidian Vault.
+//! mcp-obsidian — MCP server for writing, reading, and mapping per-project
+//! memories into an Obsidian Vault.
 
 mod cluster;
 mod config;
-// Tanpa fitur `semantic`, helper index di `embed` sengaja tak terpakai
-// (hanya dipakai jalur ber-feature) — bungkam dead-code khusus build itu.
+mod docs;
+// Without the `semantic` feature, the index helper in `embed` is intentionally
+// unused (only used on the feature-gated path) — silence dead-code for that build.
 #[cfg_attr(not(feature = "semantic"), allow(dead_code))]
 mod embed;
 mod links;
@@ -25,7 +26,7 @@ use server::ObsidianServer;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // PENTING: log harus ke stderr — stdout dipakai protokol MCP (JSON-RPC).
+    // IMPORTANT: logs must go to stderr — stdout is used by the MCP protocol (JSON-RPC).
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
@@ -37,23 +38,25 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         vault = %config.vault_path.display(),
         memory_root = %config.memory_root,
-        "mcp-obsidian dimulai"
+        docs_root = %config.docs_root,
+        "mcp-obsidian started"
     );
 
     let server = ObsidianServer::new(config.clone());
 
-    // Bila fitur `watch` aktif, pantau folder memori untuk auto-regen _MOC.md
-    // saat memori diedit langsung di Obsidian. Guard harus hidup selama server.
+    // When the `watch` feature is enabled, watch the memory folder to auto-regenerate
+    // _MOC.md when a memory is edited directly in Obsidian. The guard must live as long
+    // as the server.
     #[cfg(feature = "watch")]
     let _watch_guard = match watcher::spawn(config.clone(), server.io_lock()) {
         Ok(g) => Some(g),
         Err(e) => {
-            tracing::warn!("file watcher gagal dimulai: {e}");
+            tracing::warn!("file watcher failed to start: {e}");
             None
         }
     };
 
-    // Jalankan server di atas transport stdio dan tunggu sampai selesai.
+    // Run the server over the stdio transport and wait until it finishes.
     let service = server.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
