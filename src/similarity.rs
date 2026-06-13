@@ -1,64 +1,65 @@
-//! "Relasi pintar": menyarankan link antar-memori berdasarkan kemiripan.
+//! "Smart relations": suggest links between memories based on similarity.
 //!
-//! Skor kemiripan dua memori = gabungan dari:
-//! - **kemiripan tag**  : Jaccard pada himpunan tag (`|A∩B| / |A∪B|`),
-//! - **kemiripan isi**  : cosine similarity pada vektor TF-IDF dari teks
-//!   (`name + description + body`).
+//! The similarity score of two memories = a combination of:
+//! - **tag similarity**     : Jaccard over the tag sets (`|A∩B| / |A∪B|`),
+//! - **content similarity** : cosine similarity over the TF-IDF vectors of the
+//!   text (`name + description + body`).
 //!
-//! `skor = TAG_WEIGHT * tag + CONTENT_WEIGHT * isi`.
+//! `score = TAG_WEIGHT * tag + CONTENT_WEIGHT * content`.
 //!
-//! Saran yang sudah tercatat di field `links` memori sumber tidak diusulkan lagi.
+//! Suggestions already recorded in the source memory's `links` field are not
+//! proposed again.
 
 use crate::memory::Memory;
 use crate::project::slugify;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
-/// Bobot komponen tag pada skor akhir.
+/// Weight of the tag component in the final score.
 const TAG_WEIGHT: f64 = 0.6;
-/// Bobot komponen isi (TF-IDF cosine) pada skor akhir.
+/// Weight of the content component (TF-IDF cosine) in the final score.
 const CONTENT_WEIGHT: f64 = 0.4;
 
-/// Berapa banyak saran yang dikembalikan per memori secara default.
+/// How many suggestions are returned per memory by default.
 pub const DEFAULT_TOP_N: usize = 5;
-/// Skor minimum agar sebuah pasangan dianggap "mirip".
+/// Minimum score for a pair to be considered "similar".
 pub const DEFAULT_THRESHOLD: f64 = 0.05;
 
-/// Satu saran relasi untuk sebuah memori sumber.
+/// A single relation suggestion for a source memory.
 #[derive(Debug, Clone, Serialize)]
 pub struct Suggestion {
-    /// Slug memori yang disarankan untuk ditautkan.
+    /// Slug of the memory suggested for linking.
     pub name: String,
-    /// Skor kemiripan gabungan (0.0–1.0), dibulatkan saat serialisasi.
+    /// Combined similarity score (0.0–1.0), rounded on serialization.
     pub score: f64,
-    /// Tag yang dimiliki bersama (alasan saran).
+    /// Tags held in common (the reason for the suggestion).
     pub shared_tags: Vec<String>,
-    /// Term (kata kunci) paling kuat yang dimiliki bersama (alasan saran).
+    /// The strongest terms (keywords) held in common (the reason for the suggestion).
     pub shared_terms: Vec<String>,
 }
 
-/// Saran untuk seluruh memori dalam project: `(nama_sumber, daftar_saran)`.
+/// Suggestions for every memory in a project: `(source_name, suggestion_list)`.
 pub type SuggestionMap = Vec<(String, Vec<Suggestion>)>;
 
-/// Dokumen yang sudah diproses: vektor TF-IDF + himpunan tag + link eksplisit.
+/// A preprocessed document: TF-IDF vector + tag set + explicit links.
 struct Doc {
     name: String,
     tags: HashSet<String>,
-    /// term -> bobot TF-IDF
+    /// term -> TF-IDF weight
     vec: HashMap<String, f64>,
-    /// norma (panjang) vektor, dipra-hitung untuk cosine.
+    /// vector norm (length), precomputed for cosine.
     norm: f64,
-    /// slug yang sudah ditautkan secara eksplisit (di-skip dari saran).
+    /// slugs already linked explicitly (skipped from suggestions).
     explicit_links: HashSet<String>,
 }
 
-/// Stopword umum (Indonesia + Inggris) yang dibuang sebelum skoring isi.
+/// Common stopwords (Indonesian + English) discarded before content scoring.
 const STOPWORDS: &[&str] = &[
-    // Indonesia
+    // Indonesian
     "yang", "dan", "di", "ke", "dari", "untuk", "pada", "dengan", "atau", "ini", "itu", "adalah",
     "akan", "tidak", "bisa", "ada", "juga", "agar", "saat", "oleh", "dalam", "karena", "sebagai",
     "lalu", "bila", "saja", "per", "tiap", "kita", "kami", "saya", "anda", "dia", "mereka", "nya",
-    "satu", "dua", // Inggris
+    "satu", "dua", // English
     "the", "and", "for", "with", "this", "that", "are", "was", "from", "into", "not", "but", "can",
     "has", "have", "will", "you", "use", "via", "per", "all", "any", "its", "out", "set", "see",
     "one", "two",
@@ -68,8 +69,8 @@ fn is_stopword(w: &str) -> bool {
     STOPWORDS.contains(&w)
 }
 
-/// Pecah teks menjadi token bermakna: lowercase, hanya alfanumerik, panjang ≥ 3,
-/// bukan stopword.
+/// Split text into meaningful tokens: lowercase, alphanumeric only, length ≥ 3,
+/// not a stopword.
 fn tokenize(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric())
         .map(|w| w.to_lowercase())
@@ -77,12 +78,12 @@ fn tokenize(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Pra-proses semua memori menjadi `Doc` (hitung TF-IDF sekali untuk seluruh
-/// korpus project).
+/// Preprocess all memories into `Doc`s (compute TF-IDF once for the entire
+/// project corpus).
 fn build_docs(memories: &[Memory]) -> Vec<Doc> {
     let n = memories.len() as f64;
 
-    // 1) term frequency per dokumen.
+    // 1) term frequency per document.
     let tfs: Vec<HashMap<String, f64>> = memories
         .iter()
         .map(|m| {
@@ -100,7 +101,7 @@ fn build_docs(memories: &[Memory]) -> Vec<Doc> {
         })
         .collect();
 
-    // 2) document frequency tiap term (berapa dokumen memuatnya).
+    // 2) document frequency of each term (how many documents contain it).
     let mut df: HashMap<String, f64> = HashMap::new();
     for tf in &tfs {
         for term in tf.keys() {
@@ -108,7 +109,7 @@ fn build_docs(memories: &[Memory]) -> Vec<Doc> {
         }
     }
 
-    // 3) vektor TF-IDF + norma (IDF smoothed: ln((N+1)/(df+1)) + 1).
+    // 3) TF-IDF vector + norm (smoothed IDF: ln((N+1)/(df+1)) + 1).
     memories
         .iter()
         .zip(tfs)
@@ -130,12 +131,12 @@ fn build_docs(memories: &[Memory]) -> Vec<Doc> {
         .collect()
 }
 
-/// Cosine similarity antar dua vektor TF-IDF.
+/// Cosine similarity between two TF-IDF vectors.
 fn cosine(a: &Doc, b: &Doc) -> f64 {
     if a.norm == 0.0 || b.norm == 0.0 {
         return 0.0;
     }
-    // Iterasi map yang lebih kecil demi efisiensi.
+    // Iterate the smaller map for efficiency.
     let (small, large) = if a.vec.len() <= b.vec.len() {
         (a, b)
     } else {
@@ -149,7 +150,7 @@ fn cosine(a: &Doc, b: &Doc) -> f64 {
     dot / (a.norm * b.norm)
 }
 
-/// Jaccard similarity antar dua himpunan tag.
+/// Jaccard similarity between two tag sets.
 fn jaccard(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
     let inter = a.intersection(b).count() as f64;
     let union = a.union(b).count() as f64;
@@ -160,7 +161,7 @@ fn jaccard(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
     }
 }
 
-/// Term bersama dengan bobot gabungan tertinggi (untuk menjelaskan saran).
+/// Shared terms with the highest combined weight (to explain a suggestion).
 fn top_shared_terms(a: &Doc, b: &Doc, limit: usize) -> Vec<String> {
     let mut shared: Vec<(String, f64)> = a
         .vec
@@ -175,23 +176,24 @@ fn top_shared_terms(a: &Doc, b: &Doc, limit: usize) -> Vec<String> {
     shared.into_iter().take(limit).map(|(t, _)| t).collect()
 }
 
-/// Peta embedding opsional: slug → vektor ternormalisasi. Bila ada, komponen
-/// "isi" pada skor saran memakai cosine embedding (by makna) alih-alih TF-IDF.
+/// Optional embedding map: slug → normalized vector. When present, the "content"
+/// component of the suggestion score uses embedding cosine (by meaning) instead
+/// of TF-IDF.
 pub type Embeddings = std::collections::HashMap<String, Vec<f32>>;
 
-/// Kemiripan isi dua dokumen: pakai embedding bila keduanya punya vektor,
-/// selain itu fallback ke cosine TF-IDF.
+/// Content similarity of two documents: use embeddings when both have a vector,
+/// otherwise fall back to TF-IDF cosine.
 fn content_similarity(t: &Doc, d: &Doc, emb: Option<&Embeddings>) -> f64 {
     if let Some(map) = emb {
         if let (Some(vt), Some(vd)) = (map.get(&t.name), map.get(&d.name)) {
-            // Vektor sudah L2-normalized → cosine = dot product.
+            // Vectors are already L2-normalized → cosine = dot product.
             return crate::embed::cosine_sim(vt, vd) as f64;
         }
     }
     cosine(t, d)
 }
 
-/// Hitung saran untuk dokumen index `ti` terhadap dokumen lain.
+/// Compute suggestions for the document at index `ti` against the other documents.
 fn suggest_from_docs(
     docs: &[Doc],
     ti: usize,
@@ -232,9 +234,9 @@ fn suggest_from_docs(
     out
 }
 
-/// Seperti [`suggest_all_ext`] tapi untuk satu memori (berdasarkan slug);
-/// bila `emb` diberikan, komponen isi memakai
-/// kemiripan embedding (by makna) alih-alih TF-IDF.
+/// Like [`suggest_all_ext`] but for a single memory (by slug); when `emb` is
+/// given, the content component uses embedding similarity (by meaning) instead
+/// of TF-IDF.
 pub fn suggest_for_ext(
     target: &str,
     memories: &[Memory],
@@ -249,14 +251,14 @@ pub fn suggest_for_ext(
     }
 }
 
-/// Saran relasi untuk semua memori dalam project (mengabaikan yang tanpa saran).
-/// Memakai TF-IDF untuk komponen isi.
+/// Relation suggestions for every memory in a project (skipping those with no
+/// suggestions). Uses TF-IDF for the content component.
 pub fn suggest_all(memories: &[Memory], top_n: usize, threshold: f64) -> SuggestionMap {
     suggest_all_ext(memories, top_n, threshold, None)
 }
 
-/// Seperti [`suggest_all`], tapi bila `emb` diberikan, komponen isi memakai
-/// kemiripan embedding (by makna) alih-alih TF-IDF.
+/// Like [`suggest_all`], but when `emb` is given, the content component uses
+/// embedding similarity (by meaning) instead of TF-IDF.
 pub fn suggest_all_ext(
     memories: &[Memory],
     top_n: usize,
@@ -300,29 +302,29 @@ mod tests {
         let mems = vec![
             mem(
                 "auth-flow",
-                "autentikasi jwt",
-                "token jwt untuk login pengguna",
+                "jwt authentication",
+                "jwt token for user login",
                 &["auth"],
                 &[],
             ),
             mem(
                 "login-page",
-                "halaman login",
-                "form login mengirim token jwt",
+                "login page",
+                "login form sends jwt token",
                 &["auth"],
                 &[],
             ),
             mem(
                 "ui-theme",
-                "warna tema",
-                "palet warna gelap dan terang",
+                "theme colors",
+                "dark and light color palette",
                 &["design"],
                 &[],
             ),
         ];
         let s = suggest_for_ext("auth-flow", &mems, 5, 0.0, None);
         assert_eq!(s.first().map(|x| x.name.as_str()), Some("login-page"));
-        // login-page (tag+isi sama) harus mengungguli ui-theme.
+        // login-page (same tag+content) should outrank ui-theme.
         let score_login = s.iter().find(|x| x.name == "login-page").unwrap().score;
         let score_theme = s
             .iter()
@@ -341,26 +343,26 @@ mod tests {
     #[test]
     fn already_linked_is_not_suggested() {
         let mems = vec![
-            mem("a", "soal jwt", "token jwt", &["auth"], &["b"]),
-            mem("b", "soal jwt juga", "token jwt", &["auth"], &[]),
+            mem("a", "about jwt", "jwt token", &["auth"], &["b"]),
+            mem("b", "also about jwt", "jwt token", &["auth"], &[]),
         ];
         let s = suggest_for_ext("a", &mems, 5, 0.0, None);
         assert!(
             s.iter().all(|x| x.name != "b"),
-            "b sudah ditautkan, tak boleh disarankan"
+            "b is already linked, must not be suggested"
         );
     }
 
     #[test]
     fn threshold_filters_weak_matches() {
         let mems = vec![
-            mem("a", "kucing", "kucing oranye lucu", &["hewan"], &[]),
-            mem("b", "kompiler", "optimisasi kode rust", &["dev"], &[]),
+            mem("a", "cat", "cute orange cat", &["hewan"], &[]),
+            mem("b", "compiler", "rust code optimization", &["dev"], &[]),
         ];
         let s = suggest_for_ext("a", &mems, 5, 0.5, None);
         assert!(
             s.is_empty(),
-            "dua memori tak terkait tak boleh lolos threshold tinggi"
+            "two unrelated memories must not pass a high threshold"
         );
     }
 }

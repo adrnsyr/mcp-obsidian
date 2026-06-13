@@ -1,7 +1,7 @@
-//! Representasi satu memori dan operasi baca/tulis ke file Markdown.
+//! Representation of a single memory and read/write operations to a Markdown file.
 //!
-//! Setiap memori = satu file `.md` dengan frontmatter YAML di atas dan body
-//! Markdown di bawah. Body boleh berisi `[[wikilink]]` ke memori lain.
+//! Each memory = one `.md` file with YAML frontmatter at the top and a Markdown
+//! body below. The body may contain `[[wikilink]]`s to other memories.
 
 use crate::config::{ensure_dir, Config};
 use crate::embed::SemanticHit;
@@ -9,25 +9,25 @@ use crate::project::slugify;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// Frontmatter YAML sebuah memori.
+/// YAML frontmatter of a memory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Frontmatter {
-    /// Slug unik dalam satu project (sekaligus nama file).
+    /// Unique slug within a project (also the file name).
     pub name: String,
-    /// Ringkasan satu baris — dipakai saat search/list & di peta.
+    /// One-line summary — used during search/list & in the map.
     pub description: String,
-    /// Tag bebas untuk pengelompokan di peta & Obsidian.
+    /// Free-form tags for grouping in the map & Obsidian.
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Kategori memori, mis. `project`, `reference`, `decision`, `note`.
+    /// Memory category, e.g. `project`, `reference`, `decision`, `note`.
     #[serde(default = "default_type", rename = "type")]
     pub kind: String,
-    /// Slug memori lain yang terkait (dirender sebagai wikilink di peta).
+    /// Slugs of related memories (rendered as wikilinks in the map).
     #[serde(default)]
     pub links: Vec<String>,
-    /// Timestamp RFC3339 saat dibuat.
+    /// RFC3339 timestamp of when it was created.
     pub created: String,
-    /// Timestamp RFC3339 saat terakhir diubah.
+    /// RFC3339 timestamp of when it was last modified.
     pub updated: String,
 }
 
@@ -35,7 +35,7 @@ fn default_type() -> String {
     "note".to_string()
 }
 
-/// Memori lengkap = frontmatter + body Markdown.
+/// A complete memory = frontmatter + Markdown body.
 #[derive(Debug, Clone)]
 pub struct Memory {
     pub front: Frontmatter,
@@ -43,17 +43,17 @@ pub struct Memory {
 }
 
 impl Memory {
-    /// Render ke teks file lengkap (frontmatter + body).
+    /// Render to the full file text (frontmatter + body).
     pub fn to_file_string(&self) -> anyhow::Result<String> {
         let yaml = serde_yaml::to_string(&self.front)?;
-        // `serde_yaml::to_string` tidak menambahkan delimiter `---`.
+        // `serde_yaml::to_string` does not add the `---` delimiter.
         Ok(format!("---\n{yaml}---\n\n{}\n", self.body.trim_end()))
     }
 
-    /// Parse dari teks file lengkap.
+    /// Parse from the full file text.
     pub fn from_file_string(raw: &str) -> anyhow::Result<Self> {
         let (front_yaml, body) = split_frontmatter(raw)
-            .ok_or_else(|| anyhow::anyhow!("file memori tidak punya frontmatter YAML"))?;
+            .ok_or_else(|| anyhow::anyhow!("memory file has no YAML frontmatter"))?;
         let front: Frontmatter = serde_yaml::from_str(front_yaml)?;
         Ok(Self {
             front,
@@ -62,20 +62,20 @@ impl Memory {
     }
 }
 
-/// Pisahkan blok frontmatter (`---\n...\n---`) dari body.
-/// Mengembalikan `(yaml_tanpa_delimiter, body)`.
+/// Split the frontmatter block (`---\n...\n---`) from the body.
+/// Returns `(yaml_without_delimiter, body)`.
 fn split_frontmatter(raw: &str) -> Option<(&str, &str)> {
-    let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw); // buang BOM bila ada
+    let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw); // strip BOM if present
     let rest = raw.strip_prefix("---")?;
-    // delimiter pembuka harus diikuti newline
+    // the opening delimiter must be followed by a newline
     let rest = rest
         .strip_prefix('\n')
         .or_else(|| rest.strip_prefix("\r\n"))?;
-    // cari delimiter penutup `\n---`
+    // find the closing delimiter `\n---`
     let end = rest.find("\n---")?;
     let yaml = &rest[..end];
-    let after = &rest[end + 4..]; // lewati "\n---"
-                                  // body dimulai setelah newline berikutnya
+    let after = &rest[end + 4..]; // skip "\n---"
+                                  // the body starts after the next newline
     let body = after
         .strip_prefix('\n')
         .or_else(|| after.strip_prefix("\r\n"))
@@ -83,14 +83,14 @@ fn split_frontmatter(raw: &str) -> Option<(&str, &str)> {
     Some((yaml, body))
 }
 
-/// Hasil operasi tulis memori.
+/// Result of a memory write operation.
 pub struct WriteOutcome {
     pub slug: String,
     pub path: std::path::PathBuf,
     pub created: bool,
 }
 
-/// Argumen untuk membuat / memperbarui memori.
+/// Arguments for creating / updating a memory.
 pub struct WriteInput {
     pub name: String,
     pub description: String,
@@ -100,8 +100,8 @@ pub struct WriteInput {
     pub links: Vec<String>,
 }
 
-/// Tulis (buat atau update) sebuah memori. Saat update, field `created`
-/// dipertahankan dari file lama; `updated` selalu di-refresh.
+/// Write (create or update) a memory. On update, the `created` field is
+/// preserved from the old file; `updated` is always refreshed.
 pub fn write_memory(
     config: &Config,
     project: &str,
@@ -110,7 +110,7 @@ pub fn write_memory(
     let slug = slugify(&input.name);
     anyhow::ensure!(
         !slug.is_empty(),
-        "nama memori tidak valid setelah disanitasi"
+        "memory name is invalid after sanitization"
     );
 
     let dir = config.project_dir(project);
@@ -153,18 +153,18 @@ pub fn write_memory(
     })
 }
 
-/// Hasil operasi rename.
+/// Result of a rename operation.
 pub struct RenameOutcome {
     pub old_slug: String,
     pub new_slug: String,
-    /// Slug memori lain yang tautannya ikut diperbarui.
+    /// Slugs of other memories whose links were also updated.
     pub updated_referrers: Vec<String>,
 }
 
-/// Ganti nama (slug) sebuah memori, lalu perbarui SEMUA tautan masuk
-/// (field `links` & `[[wikilink]]` di body) milik memori lain agar tetap
-/// resolve. Timestamp `created` memori dipertahankan; `updated` di-refresh
-/// untuk memori yang berubah. Tidak menyentuh `_MOC.md` (pemanggil regen).
+/// Rename (slug) a memory, then update ALL incoming links (the `links` field &
+/// `[[wikilink]]`s in the body) of other memories so they still resolve. The
+/// memory's `created` timestamp is preserved; `updated` is refreshed for the
+/// memories that changed. Does not touch `_MOC.md` (the caller regenerates it).
 pub fn rename_memory(
     config: &Config,
     project: &str,
@@ -175,25 +175,24 @@ pub fn rename_memory(
     let new_slug = slugify(new_name);
     anyhow::ensure!(
         !new_slug.is_empty(),
-        "nama baru tidak valid setelah disanitasi"
+        "new name is invalid after sanitization"
     );
     anyhow::ensure!(
         old_slug != new_slug,
-        "nama lama & baru menghasilkan slug yang sama ('{new_slug}')"
+        "old & new names produce the same slug ('{new_slug}')"
     );
 
-    let old = read_memory(config, project, &old_slug).map_err(|_| {
-        anyhow::anyhow!("memori '{old_slug}' tidak ditemukan di project '{project}'")
-    })?;
+    let old = read_memory(config, project, &old_slug)
+        .map_err(|_| anyhow::anyhow!("memory '{old_slug}' not found in project '{project}'"))?;
     let new_path = config.memory_file(project, &new_slug);
     anyhow::ensure!(
         !new_path.exists(),
-        "target '{new_slug}' sudah ada — pilih nama lain"
+        "target '{new_slug}' already exists — choose another name"
     );
 
     let now = now_rfc3339();
 
-    // 1. Tulis file baru (pertahankan `created`), 2. hapus file lama.
+    // 1. Write the new file (preserve `created`), 2. delete the old file.
     let mut front = old.front.clone();
     front.name = new_slug.clone();
     front.updated = now.clone();
@@ -204,12 +203,12 @@ pub fn rename_memory(
     std::fs::write(&new_path, new_mem.to_file_string()?)?;
     std::fs::remove_file(config.memory_file(project, &old_slug))?;
 
-    // 3. Perbarui semua perujuk (field links + wikilink body).
+    // 3. Update all referrers (links field + body wikilinks).
     let mut updated_referrers = Vec::new();
     for m in load_all(config, project) {
         let slug = slugify(&m.front.name);
         if slug == new_slug {
-            continue; // memori hasil rename sendiri
+            continue; // the just-renamed memory itself
         }
         let mut changed = false;
 
@@ -220,7 +219,7 @@ pub fn rename_memory(
                 changed = true;
             }
         }
-        // dedup pasca-penggantian (jaga urutan kemunculan pertama).
+        // dedup after replacement (preserve first-occurrence order).
         let mut seen = std::collections::BTreeSet::new();
         links.retain(|l| seen.insert(slugify(l)));
 
@@ -253,16 +252,16 @@ pub fn rename_memory(
     })
 }
 
-/// Baca satu memori berdasarkan slug.
+/// Read a single memory by slug.
 pub fn read_memory(config: &Config, project: &str, name: &str) -> anyhow::Result<Memory> {
     let slug = slugify(name);
     let path = config.memory_file(project, &slug);
     let raw = std::fs::read_to_string(&path)
-        .map_err(|e| anyhow::anyhow!("gagal membaca '{}': {e}", path.display()))?;
+        .map_err(|e| anyhow::anyhow!("failed to read '{}': {e}", path.display()))?;
     Memory::from_file_string(&raw)
 }
 
-/// Hapus satu memori. Mengembalikan `true` bila file memang ada & terhapus.
+/// Delete a single memory. Returns `true` if the file actually existed & was removed.
 pub fn delete_memory(config: &Config, project: &str, name: &str) -> anyhow::Result<bool> {
     let slug = slugify(name);
     let path = config.memory_file(project, &slug);
@@ -273,7 +272,7 @@ pub fn delete_memory(config: &Config, project: &str, name: &str) -> anyhow::Resu
     Ok(true)
 }
 
-/// Item ringkas untuk list/search.
+/// Brief item for list/search.
 #[derive(Debug, Clone, Serialize)]
 pub struct MemoryEntry {
     pub name: String,
@@ -296,7 +295,7 @@ impl From<&Frontmatter> for MemoryEntry {
     }
 }
 
-/// Muat semua memori dalam satu project (mengabaikan file `_MOC.md`).
+/// Load all memories in a single project (ignoring the `_MOC.md` file).
 pub fn load_all(config: &Config, project: &str) -> Vec<Memory> {
     let dir = config.project_dir(project);
     let mut out = Vec::new();
@@ -319,7 +318,7 @@ pub fn load_all(config: &Config, project: &str) -> Vec<Memory> {
     out
 }
 
-/// Daftar ringkas semua memori dalam satu project.
+/// Brief list of all memories in a single project.
 pub fn list_entries(config: &Config, project: &str) -> Vec<MemoryEntry> {
     load_all(config, project)
         .iter()
@@ -327,7 +326,7 @@ pub fn list_entries(config: &Config, project: &str) -> Vec<MemoryEntry> {
         .collect()
 }
 
-/// Hasil satu kecocokan pencarian.
+/// Result of a single search match.
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchHit {
     pub name: String,
@@ -337,8 +336,8 @@ pub struct SearchHit {
     pub snippet: String,
 }
 
-/// Cari memori berdasarkan query teks (opsional) dan/atau tag (opsional).
-/// Skor sederhana: cocok di nama/description bernilai lebih tinggi dari body.
+/// Search memories by text query (optional) and/or tag (optional).
+/// Simple scoring: a match in name/description weighs more than one in the body.
 pub fn search(
     config: &Config,
     project: &str,
@@ -348,13 +347,13 @@ pub fn search(
     search_in(&load_all(config, project), query, tag)
 }
 
-/// Skoring keyword murni atas sekumpulan memori (tanpa I/O), agar bisa dipakai
-/// ulang baik oleh memori maupun dokumen. Lihat [`search`] untuk varian yang
-/// memuat dari disk.
+/// Pure keyword scoring over a set of memories (no I/O), so it can be reused by
+/// both memories and documents. See [`search`] for the variant that loads from
+/// disk.
 pub fn search_in(memories: &[Memory], query: Option<&str>, tag: Option<&str>) -> Vec<SearchHit> {
-    // Pecah query jadi term per-whitespace. Mencocokkan SETIAP term secara
-    // terpisah (bukan frasa utuh) agar query multi-kata seperti
-    // "io_lock konkurensi" tetap cocok walau kata-katanya tak berurutan.
+    // Split the query into terms per whitespace. Match EACH term separately
+    // (not as a whole phrase) so that a multi-word query like
+    // "io_lock konkurensi" still matches even if the words are not contiguous.
     let q_terms: Option<Vec<String>> = query.map(|s| {
         s.to_lowercase()
             .split_whitespace()
@@ -378,14 +377,14 @@ pub fn search_in(memories: &[Memory], query: Option<&str>, tag: Option<&str>) ->
         let mut snippet = f.description.clone();
 
         match &q_terms {
-            // Query kosong/whitespace dianggap "tanpa query" → semua lolos.
+            // An empty/whitespace query is treated as "no query" → everything passes.
             Some(terms) if !terms.is_empty() => {
                 let name_lower = f.name.to_lowercase();
                 let desc_lower = f.description.to_lowercase();
                 let body_lower = mem.body.to_lowercase();
                 let mut snippet_set = false;
-                // Skor dijumlahkan lintas-term: dok yang cocok lebih banyak
-                // term naik peringkatnya. Cukup satu term cocok untuk lolos.
+                // Scores are summed across terms: a doc matching more terms
+                // ranks higher. A single matching term is enough to pass.
                 for term in terms {
                     if name_lower.contains(term) {
                         score += 5;
@@ -405,11 +404,11 @@ pub fn search_in(memories: &[Memory], query: Option<&str>, tag: Option<&str>) ->
                     }
                 }
                 if score == 0 {
-                    continue; // ada query tapi tidak ada term yang cocok
+                    continue; // a query exists but no term matched
                 }
             }
             _ => {
-                // tanpa query (mungkin hanya filter tag): semua lolos
+                // no query (possibly just a tag filter): everything passes
                 score = 1;
             }
         }
@@ -427,22 +426,23 @@ pub fn search_in(memories: &[Memory], query: Option<&str>, tag: Option<&str>) ->
     hits
 }
 
-/// Satu hasil pencarian hybrid (gabungan keyword + semantik).
+/// A single hybrid search result (combined keyword + semantic).
 #[derive(Debug, Clone, Serialize)]
 pub struct HybridHit {
     pub name: String,
     pub description: String,
-    /// Skor gabungan 0.0–1.0 (rata-rata komponen keyword & semantik).
+    /// Combined score 0.0–1.0 (average of the keyword & semantic components).
     pub score: f32,
-    /// Komponen keyword ternormalisasi (0.0–1.0).
+    /// Normalized keyword component (0.0–1.0).
     pub keyword: f32,
-    /// Komponen semantik (cosine, 0.0–1.0; 0 bila fitur semantic mati).
+    /// Semantic component (cosine, 0.0–1.0; 0 if the semantic feature is off).
     pub semantic: f32,
 }
 
-/// Gabungkan hasil keyword (`SearchHit`) & semantik (`SemanticHit`) menjadi satu
-/// ranking. Keyword dinormalisasi ke skor tertinggi pada batch ini; skor akhir =
-/// rata-rata sederhana kedua komponen. Fungsi murni (tanpa I/O) agar mudah diuji.
+/// Merge keyword results (`SearchHit`) & semantic results (`SemanticHit`) into a
+/// single ranking. Keyword scores are normalized to the highest score in this
+/// batch; the final score = a simple average of both components. A pure function
+/// (no I/O) so it is easy to test.
 pub fn merge_hybrid(kw: &[SearchHit], sem: &[SemanticHit], top: usize) -> Vec<HybridHit> {
     use std::collections::BTreeMap;
     let max_kw = kw.iter().map(|h| h.score).max().unwrap_or(0) as f32;
@@ -494,7 +494,7 @@ pub fn merge_hybrid(kw: &[SearchHit], sem: &[SemanticHit], top: usize) -> Vec<Hy
 fn make_snippet(body: &str, pos: usize, qlen: usize) -> String {
     let start = pos.saturating_sub(40);
     let end = (pos + qlen + 40).min(body.len());
-    // geser ke batas char yang valid
+    // shift to a valid char boundary
     let start = floor_char_boundary(body, start);
     let end = ceil_char_boundary(body, end);
     let mut s = body[start..end].replace('\n', " ");
@@ -526,7 +526,7 @@ fn is_memory_file(path: &Path) -> bool {
         return false;
     }
     match path.file_name().and_then(|n| n.to_str()) {
-        Some(name) => !name.starts_with('_'), // _MOC.md dan file meta lain diabaikan
+        Some(name) => !name.starts_with('_'), // _MOC.md and other meta files are ignored
         None => false,
     }
 }
@@ -541,7 +541,7 @@ fn normalize_list(items: Vec<String>) -> Vec<String> {
     out
 }
 
-/// Timestamp lokal RFC3339, mis. `2026-05-30T22:40:00+07:00`.
+/// Local RFC3339 timestamp, e.g. `2026-05-30T22:40:00+07:00`.
 pub fn now_rfc3339() -> String {
     chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
 }
@@ -595,7 +595,7 @@ mod tests {
         assert!(out.created);
 
         let raw = std::fs::read_to_string(&out.path).unwrap();
-        assert_eq!(count_created(&raw), 1, "frontmatter rusak:\n{raw}");
+        assert_eq!(count_created(&raw), 1, "frontmatter is corrupt:\n{raw}");
 
         let mem = read_memory(&cfg, "demo", "auth-flow").unwrap();
         assert_eq!(mem.front.name, "auth-flow");
@@ -612,10 +612,10 @@ mod tests {
         let created1 = read_memory(&cfg, "demo", "x").unwrap().front.created;
 
         let out = write_memory(&cfg, "demo", simple("X", "d2", "b2")).unwrap();
-        assert!(!out.created, "write kedua harusnya update, bukan create");
+        assert!(!out.created, "the second write should update, not create");
 
         let m = read_memory(&cfg, "demo", "x").unwrap();
-        assert_eq!(m.front.created, created1, "created harus dipertahankan");
+        assert_eq!(m.front.created, created1, "created must be preserved");
         assert_eq!(m.front.description, "d2");
         assert_eq!(m.body, "b2");
     }
@@ -634,9 +634,10 @@ mod tests {
         assert_eq!(hits[0].name, "alpha");
     }
 
-    /// Regresi: query multi-kata harus cocok per-token, bukan sebagai frasa utuh.
-    /// Dulu query di-`.contains()` sebagai satu string, sehingga "rust konkurensi"
-    /// (yang tak pernah muncul berurutan) mengembalikan 0 hasil walau kedua kata ada.
+    /// Regression: a multi-word query must match per-token, not as a whole phrase.
+    /// Previously the query was `.contains()`-checked as a single string, so
+    /// "rust konkurensi" (which never appears contiguously) returned 0 results
+    /// even though both words were present.
     #[test]
     fn search_multiword_matches_scattered_terms() {
         let cfg = tmp_config();
@@ -653,12 +654,12 @@ mod tests {
         write_memory(&cfg, "demo", simple("Beta", "lain", "tak ada kata kunci")).unwrap();
 
         let hits = search(&cfg, "demo", Some("rust konkurensi"), None);
-        assert_eq!(hits.len(), 1, "query multi-kata harus cocok per-token");
+        assert_eq!(hits.len(), 1, "a multi-word query must match per-token");
         assert_eq!(hits[0].name, "alpha");
     }
 
-    /// Dok yang cocok lebih banyak term harus berperingkat lebih tinggi (skor
-    /// dijumlahkan lintas-term).
+    /// A doc matching more terms must rank higher (scores are summed across
+    /// terms).
     #[test]
     fn search_ranks_more_term_matches_higher() {
         let cfg = tmp_config();
@@ -674,7 +675,7 @@ mod tests {
         assert_eq!(hits.len(), 2);
         assert_eq!(
             hits[0].name, "both",
-            "dok yang cocok lebih banyak token harus di atas"
+            "a doc matching more tokens must be on top"
         );
         assert!(hits[0].score > hits[1].score);
     }
@@ -682,10 +683,10 @@ mod tests {
     #[test]
     fn rename_updates_referrers_and_preserves_created() {
         let cfg = tmp_config();
-        // target yang akan di-rename
+        // the target to be renamed
         write_memory(&cfg, "demo", simple("Old Name", "d", "isi")).unwrap();
         let created = read_memory(&cfg, "demo", "old-name").unwrap().front.created;
-        // perujuk: via field links + via wikilink body (pakai display berbeda)
+        // referrers: via the links field + via a body wikilink (different display)
         write_memory(
             &cfg,
             "demo",
@@ -704,12 +705,12 @@ mod tests {
         assert_eq!(out.new_slug, "new-name");
         assert_eq!(out.updated_referrers, vec!["referrer"]);
 
-        // file lama hilang, baru ada, created dipertahankan.
+        // old file gone, new one present, created preserved.
         assert!(read_memory(&cfg, "demo", "old-name").is_err());
         let renamed = read_memory(&cfg, "demo", "new-name").unwrap();
         assert_eq!(renamed.front.created, created);
 
-        // perujuk: field links & body wikilink sudah menunjuk slug baru.
+        // referrers: the links field & body wikilink now point to the new slug.
         let r = read_memory(&cfg, "demo", "referrer").unwrap();
         assert_eq!(r.front.links, vec!["new-name"]);
         assert!(r.body.contains("[[new-name]]"), "body: {}", r.body);
@@ -721,7 +722,7 @@ mod tests {
         write_memory(&cfg, "demo", simple("A", "d", "b")).unwrap();
         write_memory(&cfg, "demo", simple("B", "d", "b")).unwrap();
         let res = rename_memory(&cfg, "demo", "a", "B");
-        assert!(res.is_err(), "rename ke slug yang sudah ada harus gagal");
+        assert!(res.is_err(), "renaming to an existing slug must fail");
     }
 
     #[test]
@@ -755,12 +756,12 @@ mod tests {
             },
         ];
         let hits = merge_hybrid(&kw, &sem, 5);
-        // 3 slug unik (a, b, c). kw max=10 → a:kw=1.0, b:kw=0.5.
+        // 3 unique slugs (a, b, c). kw max=10 → a:kw=1.0, b:kw=0.5.
         // b = 0.5*0.5 + 0.5*0.9 = 0.70; a = 0.5*1.0 = 0.50; c = 0.5*0.8 = 0.40.
         assert_eq!(hits.len(), 3);
         assert_eq!(hits[0].name, "b");
         assert!((hits[0].score - 0.70).abs() < 1e-6);
-        // c hanya muncul di semantic → keyword=0.
+        // c appears only in semantic → keyword=0.
         let c = hits.iter().find(|h| h.name == "c").unwrap();
         assert_eq!(c.keyword, 0.0);
     }

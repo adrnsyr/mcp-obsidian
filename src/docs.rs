@@ -1,14 +1,15 @@
-//! Subsistem dokumen: tulis/baca dokumen panjang (spec, runbook, brainstorm,
-//! worklog) sebagai file Markdown di Obsidian Vault.
+//! Document subsystem: write/read long documents (spec, runbook, brainstorm,
+//! worklog) as Markdown files in the Obsidian Vault.
 //!
-//! Berbeda dari memori, dokumen disimpan di root terpisah
-//! (`<vault>/<docs_root>/<project>/<slug>.md`) dan SENGAJA tidak ikut diindeks
-//! ke graf, semantic search, maupun `_MOC.md`. Konsekuensinya, satu-satunya cara
-//! menemukan kembali dokumen adalah lewat [`list_docs`] & [`search_docs`] — itulah
-//! mengapa keduanya didesain berbarengan dengan tulis.
+//! Unlike memories, documents are stored in a separate root
+//! (`<vault>/<docs_root>/<project>/<slug>.md`) and are DELIBERATELY excluded
+//! from the graph, semantic search, and `_MOC.md`. As a result, the only way to
+//! find a document again is through [`list_docs`] & [`search_docs`] — which is
+//! why both were designed alongside the write path.
 //!
-//! Frontmatter & parsing memakai ulang tipe `Memory`/`Frontmatter` dari modul
-//! [`crate::memory`]; field `links` selalu kosong karena dokumen tidak bergraf.
+//! Frontmatter & parsing reuse the `Memory`/`Frontmatter` types from the
+//! [`crate::memory`] module; the `links` field is always empty because documents
+//! are not part of the graph.
 
 use crate::config::{ensure_dir, Config};
 use crate::memory::{now_rfc3339, search_in, Frontmatter, Memory, MemoryEntry, SearchHit};
@@ -16,32 +17,33 @@ use crate::project::slugify;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Kind default bila tidak ditentukan & bukan salah satu template dikenal.
+/// Default kind when none is specified & it is not one of the known templates.
 const DEFAULT_KIND: &str = "note";
 
-/// Mode penulisan dokumen.
+/// Document write mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteMode {
-    /// Tulis ulang isi dari awal (default untuk spec/runbook).
+    /// Rewrite the content from scratch (default for spec/runbook).
     Overwrite,
-    /// Tambahkan entri ber-timestamp di bawah isi yang ada (default untuk
-    /// brainstorm/worklog). Membuat file dari template bila belum ada.
+    /// Append a timestamped entry below the existing content (default for
+    /// brainstorm/worklog). Creates the file from the template if it does not
+    /// exist yet.
     Append,
 }
 
-/// Definisi satu jenis dokumen: folder sama, beda template & mode default.
+/// Definition of a single document kind: same folder, different template &
+/// default mode.
 pub struct DocKind {
     pub name: &'static str,
     pub default_mode: WriteMode,
-    /// Scaffold body saat dokumen pertama kali dibuat (boleh kosong).
+    /// Scaffold body when the document is first created (may be empty).
     pub template: &'static str,
 }
 
-const SPEC_TEMPLATE: &str =
-    "## Tujuan\n\n## Requirement\n\n## Non-goals\n\n## Desain\n\n## Risiko\n";
-const RUNBOOK_TEMPLATE: &str = "## Prasyarat\n\n## Langkah\n\n## Verifikasi\n\n## Rollback\n";
+const SPEC_TEMPLATE: &str = "## Goal\n\n## Requirements\n\n## Non-goals\n\n## Design\n\n## Risks\n";
+const RUNBOOK_TEMPLATE: &str = "## Prerequisites\n\n## Steps\n\n## Verification\n\n## Rollback\n";
 
-/// Registry jenis dokumen bawaan. Menambah jenis baru = satu entri di sini.
+/// Registry of built-in document kinds. Adding a new kind = one entry here.
 pub const DOC_KINDS: &[DocKind] = &[
     DocKind {
         name: "brainstorm",
@@ -65,24 +67,24 @@ pub const DOC_KINDS: &[DocKind] = &[
     },
 ];
 
-/// Cari definisi jenis dokumen berdasarkan nama (mis. `"spec"`).
+/// Look up a document kind definition by name (e.g. `"spec"`).
 pub fn doc_kind(name: &str) -> Option<&'static DocKind> {
     DOC_KINDS.iter().find(|k| k.name == name)
 }
 
-/// Argumen untuk menulis / menambah sebuah dokumen.
+/// Arguments for writing / appending to a document.
 pub struct DocInput {
     pub name: String,
-    /// Judul satu baris → disimpan di frontmatter `description`. Boleh kosong
-    /// saat append (deskripsi yang ada dipertahankan).
+    /// One-line title → stored in the `description` frontmatter. May be empty
+    /// on append (the existing description is preserved).
     pub title: String,
-    /// Jenis dokumen (mis. `spec`). Kosong → pertahankan yang ada / `note`.
+    /// Document kind (e.g. `spec`). Empty → keep the existing one / `note`.
     pub kind: String,
     pub body: String,
     pub tags: Vec<String>,
 }
 
-/// Hasil operasi tulis dokumen.
+/// Result of a document write operation.
 pub struct DocOutcome {
     pub slug: String,
     pub path: PathBuf,
@@ -90,13 +92,14 @@ pub struct DocOutcome {
     pub mode: WriteMode,
 }
 
-/// Tulis (buat / overwrite / append) sebuah dokumen.
+/// Write (create / overwrite / append) a document.
 ///
-/// - `Overwrite` pada dokumen baru dengan body kosong → diisi template `kind`.
-/// - `Append` → entri baru `## <timestamp>` ditambahkan; bila file belum ada,
-///   dibuat dari template `kind` lalu di-append.
+/// - `Overwrite` on a new document with an empty body → filled with the `kind`
+///   template.
+/// - `Append` → a new `## <timestamp>` entry is added; if the file does not
+///   exist yet, it is created from the `kind` template and then appended to.
 ///
-/// `created` dipertahankan saat update; `updated` selalu di-refresh.
+/// `created` is preserved on update; `updated` is always refreshed.
 pub fn write_doc(
     config: &Config,
     project: &str,
@@ -106,7 +109,7 @@ pub fn write_doc(
     let slug = slugify(&input.name);
     anyhow::ensure!(
         !slug.is_empty(),
-        "nama dokumen tidak valid setelah disanitasi"
+        "document name is invalid after sanitization"
     );
 
     let dir = config.docs_project_dir(project);
@@ -121,7 +124,7 @@ pub fn write_doc(
         .map(|m| m.front.created.clone())
         .unwrap_or_else(|| now.clone());
 
-    // Kind: argumen eksplisit menang; jika kosong, pertahankan yang ada.
+    // Kind: an explicit argument wins; if empty, keep the existing one.
     let kind = if !input.kind.trim().is_empty() {
         input.kind.trim().to_string()
     } else {
@@ -131,7 +134,7 @@ pub fn write_doc(
             .unwrap_or_else(|| DEFAULT_KIND.to_string())
     };
 
-    // Description: judul baru menang; jika kosong, pertahankan yang ada.
+    // Description: a new title wins; if empty, keep the existing one.
     let description = if !input.title.trim().is_empty() {
         input.title.trim().to_string()
     } else {
@@ -141,7 +144,7 @@ pub fn write_doc(
             .unwrap_or_default()
     };
 
-    // Tags: argumen non-kosong menang; jika kosong, pertahankan yang ada.
+    // Tags: a non-empty argument wins; if empty, keep the existing one.
     let tags = if input.tags.iter().any(|t| !t.trim().is_empty()) {
         normalize(input.tags)
     } else {
@@ -185,7 +188,7 @@ pub fn write_doc(
         description,
         tags,
         kind,
-        links: Vec::new(), // dokumen tidak bergraf
+        links: Vec::new(), // documents are not part of the graph
         created: created_ts,
         updated: now,
     };
@@ -201,16 +204,16 @@ pub fn write_doc(
     })
 }
 
-/// Baca satu dokumen berdasarkan slug.
+/// Read a single document by slug.
 pub fn read_doc(config: &Config, project: &str, name: &str) -> anyhow::Result<Memory> {
     let slug = slugify(name);
     let path = config.docs_file(project, &slug);
     let raw = std::fs::read_to_string(&path)
-        .map_err(|e| anyhow::anyhow!("gagal membaca '{}': {e}", path.display()))?;
+        .map_err(|e| anyhow::anyhow!("failed to read '{}': {e}", path.display()))?;
     Memory::from_file_string(&raw)
 }
 
-/// Hapus satu dokumen. Mengembalikan `true` bila file memang ada & terhapus.
+/// Delete a single document. Returns `true` if the file actually existed & was removed.
 pub fn delete_doc(config: &Config, project: &str, name: &str) -> anyhow::Result<bool> {
     let slug = slugify(name);
     let path = config.docs_file(project, &slug);
@@ -221,15 +224,15 @@ pub fn delete_doc(config: &Config, project: &str, name: &str) -> anyhow::Result<
     Ok(true)
 }
 
-/// Hasil operasi rename dokumen.
+/// Result of a document rename operation.
 pub struct DocRenameOutcome {
     pub old_slug: String,
     pub new_slug: String,
 }
 
-/// Ganti nama (slug) sebuah dokumen. Lebih sederhana dari memori karena dokumen
-/// tidak bergraf — tak ada tautan masuk yang perlu diperbarui. Timestamp
-/// `created` dipertahankan; `updated` di-refresh.
+/// Rename (slug) a document. Simpler than for memories because documents are
+/// not part of the graph — there are no incoming links to update. The `created`
+/// timestamp is preserved; `updated` is refreshed.
 pub fn rename_doc(
     config: &Config,
     project: &str,
@@ -240,20 +243,19 @@ pub fn rename_doc(
     let new_slug = slugify(new_name);
     anyhow::ensure!(
         !new_slug.is_empty(),
-        "nama baru tidak valid setelah disanitasi"
+        "new name is invalid after sanitization"
     );
     anyhow::ensure!(
         old_slug != new_slug,
-        "nama lama & baru menghasilkan slug yang sama ('{new_slug}')"
+        "old & new names produce the same slug ('{new_slug}')"
     );
 
-    let old = read_doc(config, project, &old_slug).map_err(|_| {
-        anyhow::anyhow!("dokumen '{old_slug}' tidak ditemukan di project '{project}'")
-    })?;
+    let old = read_doc(config, project, &old_slug)
+        .map_err(|_| anyhow::anyhow!("document '{old_slug}' not found in project '{project}'"))?;
     let new_path = config.docs_file(project, &new_slug);
     anyhow::ensure!(
         !new_path.exists(),
-        "target '{new_slug}' sudah ada — pilih nama lain"
+        "target '{new_slug}' already exists — choose another name"
     );
 
     let mut front = old.front.clone();
@@ -269,8 +271,8 @@ pub fn rename_doc(
     Ok(DocRenameOutcome { old_slug, new_slug })
 }
 
-/// Muat semua dokumen dalam satu project. Khusus folder docs — TIDAK dipakai
-/// oleh indexer memori, jadi dokumen tak pernah mencemari graf/semantic/MOC.
+/// Load all documents in a single project. Docs folder only — NOT used by the
+/// memory indexer, so documents never pollute the graph/semantic/MOC.
 pub fn load_all_docs(config: &Config, project: &str) -> Vec<Memory> {
     let dir = config.docs_project_dir(project);
     let mut out = Vec::new();
@@ -293,7 +295,7 @@ pub fn load_all_docs(config: &Config, project: &str) -> Vec<Memory> {
     out
 }
 
-/// Daftar ringkas dokumen dalam satu project, opsional difilter `kind`.
+/// Brief list of documents in a single project, optionally filtered by `kind`.
 pub fn list_docs(config: &Config, project: &str, kind: Option<&str>) -> Vec<MemoryEntry> {
     load_all_docs(config, project)
         .iter()
@@ -302,7 +304,7 @@ pub fn list_docs(config: &Config, project: &str, kind: Option<&str>) -> Vec<Memo
         .collect()
 }
 
-/// Pencarian keyword di folder docs, opsional difilter `kind`.
+/// Keyword search in the docs folder, optionally filtered by `kind`.
 pub fn search_docs(
     config: &Config,
     project: &str,
@@ -316,23 +318,23 @@ pub fn search_docs(
     search_in(&docs, query, None)
 }
 
-/// Bangun isi teks `_DOCS.md` (indeks dokumen) untuk sebuah project.
-/// Dikelompokkan per `type`, tiap entri = wikilink + deskripsi + waktu update.
+/// Build the text content of `_DOCS.md` (the document index) for a project.
+/// Grouped by `type`, each entry = wikilink + description + update time.
 pub fn build_docs_index_string(project: &str, docs: &[Memory]) -> String {
     let mut out = String::new();
-    out.push_str(&format!("# 📄 Indeks Dokumen — `{project}`\n\n"));
+    out.push_str(&format!("# 📄 Document Index — `{project}`\n\n"));
     out.push_str(&format!(
-        "> Dihasilkan otomatis oleh mcp-obsidian pada {}. \
-         Jangan diedit manual — perubahan akan ditimpa.\n\n",
+        "> Auto-generated by mcp-obsidian on {}. \
+         Do not edit manually — changes will be overwritten.\n\n",
         now_rfc3339()
     ));
 
     if docs.is_empty() {
-        out.push_str("_Belum ada dokumen untuk project ini._\n");
+        out.push_str("_No documents yet for this project._\n");
         return out;
     }
 
-    out.push_str(&format!("Total dokumen: **{}**\n\n", docs.len()));
+    out.push_str(&format!("Total documents: **{}**\n\n", docs.len()));
 
     let mut by_kind: BTreeMap<String, Vec<&Memory>> = BTreeMap::new();
     for d in docs {
@@ -348,7 +350,7 @@ pub fn build_docs_index_string(project: &str, docs: &[Memory]) -> String {
                 format!(" — {}", f.description)
             };
             out.push_str(&format!(
-                "- [[{}]]{}  _(diperbarui {})_\n",
+                "- [[{}]]{}  _(updated {})_\n",
                 f.name, desc, f.updated
             ));
         }
@@ -358,7 +360,7 @@ pub fn build_docs_index_string(project: &str, docs: &[Memory]) -> String {
     out
 }
 
-/// Regenerasi `_DOCS.md` di disk untuk sebuah project. Mengembalikan isi teks.
+/// Regenerate `_DOCS.md` on disk for a project. Returns the text content.
 pub fn regenerate_docs_index(config: &Config, project: &str) -> anyhow::Result<String> {
     let docs = load_all_docs(config, project);
     let content = build_docs_index_string(project, &docs);
@@ -446,7 +448,10 @@ mod tests {
         assert_eq!(doc.front.kind, "spec");
         assert_eq!(doc.front.description, "Spec login");
         assert_eq!(doc.body, "isi body");
-        assert!(doc.front.links.is_empty(), "dokumen tidak bergraf");
+        assert!(
+            doc.front.links.is_empty(),
+            "documents are not part of the graph"
+        );
     }
 
     #[test]
@@ -460,7 +465,7 @@ mod tests {
         )
         .unwrap();
         let doc = read_doc(&cfg, "demo", "deploy").unwrap();
-        assert!(doc.body.contains("## Prasyarat"));
+        assert!(doc.body.contains("## Prerequisites"));
         assert!(doc.body.contains("## Rollback"));
     }
 
@@ -489,10 +494,10 @@ mod tests {
         let doc = read_doc(&cfg, "demo", "sprint-log").unwrap();
         assert!(doc.body.contains("entri pertama"));
         assert!(doc.body.contains("entri kedua"));
-        // dua entri => minimal dua heading "## "
+        // two entries => at least two "## " headings
         assert!(doc.body.matches("## ").count() >= 2);
-        assert_eq!(doc.front.created, created_ts, "created dipertahankan");
-        assert_eq!(doc.front.kind, "worklog", "kind lama dipertahankan");
+        assert_eq!(doc.front.created, created_ts, "created is preserved");
+        assert_eq!(doc.front.kind, "worklog", "old kind is preserved");
     }
 
     #[test]
@@ -542,7 +547,7 @@ mod tests {
         let hits = search_docs(&cfg, "p", Some("vektor"), None);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].name, "catatan");
-        // filter kind yang tak cocok => kosong
+        // a non-matching kind filter => empty
         assert!(search_docs(&cfg, "p", Some("vektor"), Some("runbook")).is_empty());
     }
 
@@ -558,7 +563,7 @@ mod tests {
         .unwrap();
         assert!(delete_doc(&cfg, "p", "buang").unwrap());
         assert!(read_doc(&cfg, "p", "buang").is_err());
-        // hapus lagi → false (tidak ada)
+        // delete again → false (does not exist)
         assert!(!delete_doc(&cfg, "p", "buang").unwrap());
     }
 
@@ -580,13 +585,13 @@ mod tests {
 
         assert!(
             read_doc(&cfg, "p", "nama-lama").is_err(),
-            "file lama hilang"
+            "old file is gone"
         );
         let renamed = read_doc(&cfg, "p", "nama-baru").unwrap();
         assert_eq!(renamed.front.name, "nama-baru");
         assert_eq!(renamed.front.kind, "runbook");
         assert_eq!(renamed.body, "isi runbook");
-        assert_eq!(renamed.front.created, created, "created dipertahankan");
+        assert_eq!(renamed.front.created, created, "created is preserved");
     }
 
     #[test]
@@ -595,7 +600,7 @@ mod tests {
         write_doc(&cfg, "p", input("A", "spec", "", "a"), WriteMode::Overwrite).unwrap();
         write_doc(&cfg, "p", input("B", "spec", "", "b"), WriteMode::Overwrite).unwrap();
         assert!(rename_doc(&cfg, "p", "A", "B").is_err());
-        // A tetap utuh setelah rename gagal
+        // A stays intact after the failed rename
         assert_eq!(read_doc(&cfg, "p", "a").unwrap().body, "a");
     }
 
@@ -618,19 +623,19 @@ mod tests {
         .unwrap();
 
         let content = regenerate_docs_index(&cfg, "p").unwrap();
-        assert!(content.contains("Total dokumen: **2**"));
+        assert!(content.contains("Total documents: **2**"));
         assert!(content.contains("## Spec"));
         assert!(content.contains("## Runbook"));
         assert!(content.contains("[[a]]"));
         assert!(content.contains("[[b]]"));
 
-        // File _DOCS.md ada di disk tapi TIDAK ikut terbaca sebagai dokumen.
+        // The _DOCS.md file exists on disk but is NOT read back as a document.
         assert!(cfg.docs_index_file("p").exists());
         let entries = list_docs(&cfg, "p", None);
         assert_eq!(
             entries.len(),
             2,
-            "_DOCS.md tidak boleh dihitung sebagai dokumen"
+            "_DOCS.md must not be counted as a document"
         );
     }
 
@@ -638,17 +643,17 @@ mod tests {
     fn index_empty_project_is_graceful() {
         let cfg = tmp_config();
         let content = regenerate_docs_index(&cfg, "kosong").unwrap();
-        assert!(content.contains("Belum ada dokumen"));
+        assert!(content.contains("No documents yet"));
     }
 
     #[test]
     fn docs_isolated_from_memory_graph() {
         let cfg = tmp_config();
-        // Tulis satu dokumen & satu memori di project yang sama.
+        // Write one document & one memory in the same project.
         write_doc(
             &cfg,
             "proj",
-            input("Spec X", "spec", "", "isi doc"),
+            input("Spec X", "spec", "", "doc content"),
             WriteMode::Overwrite,
         )
         .unwrap();
@@ -656,9 +661,9 @@ mod tests {
             &cfg,
             "proj",
             memory::WriteInput {
-                name: "Fakta Y".into(),
-                description: "sebuah fakta".into(),
-                body: "isi memori".into(),
+                name: "Fact Y".into(),
+                description: "a fact".into(),
+                body: "memory content".into(),
                 tags: vec![],
                 kind: None,
                 links: vec![],
@@ -666,12 +671,12 @@ mod tests {
         )
         .unwrap();
 
-        // Sisi memori tidak melihat dokumen.
+        // The memory side does not see the document.
         let mem_entries = memory::list_entries(&cfg, "proj");
         assert_eq!(mem_entries.len(), 1);
-        assert_eq!(mem_entries[0].name, "fakta-y");
+        assert_eq!(mem_entries[0].name, "fact-y");
 
-        // Sisi dokumen tidak melihat memori.
+        // The document side does not see the memory.
         let doc_entries = list_docs(&cfg, "proj", None);
         assert_eq!(doc_entries.len(), 1);
         assert_eq!(doc_entries[0].name, "spec-x");

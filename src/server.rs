@@ -1,4 +1,4 @@
-//! Definisi MCP server beserta tools-nya.
+//! MCP server definition along with its tools.
 
 use crate::cluster;
 use crate::config::Config;
@@ -28,66 +28,66 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 const INSTRUCTIONS: &str = "\
-Server memori berbasis Obsidian Vault. Setiap memori adalah satu catatan Markdown \
-dengan frontmatter (name, description, tags, type, links) dan body. Memori \
-dikelompokkan per-project; bila argumen 'project' tidak diberikan, project \
-dideteksi dari working directory. Gunakan memory_write untuk menyimpan, \
-memory_read/memory_search/memory_list untuk mengambil, memory_map untuk \
-meregenerasi peta (_MOC.md), memory_suggest untuk usulan relasi pintar \
-(berdasarkan kemiripan tag & isi), memory_backlinks untuk melihat siapa yang \
-menaut sebuah memori, memory_doctor untuk memeriksa broken link & orphan, \
-memory_cluster untuk mengelompokkan memori menjadi tema (komunitas graf), \
-memory_semantic_search untuk pencarian berdasarkan makna (bila fitur 'semantic' \
-aktif), memory_recall untuk mengambil paket konteks terpadu sebuah topik \
-(semantic + isi + graf + tema dalam satu panggilan), memory_hybrid_search untuk \
-pencarian gabungan keyword+makna, memory_link untuk menambah/menghapus tautan \
-tanpa menulis ulang body, memory_rename untuk mengganti nama memori sekaligus \
-memperbarui semua tautan masuk, dan memory_delete untuk menghapus. \
-Untuk dokumen panjang (spec/runbook/brainstorm/worklog) gunakan keluarga doc_*: \
-doc_write/doc_append untuk menulis, doc_read untuk membaca, doc_list/doc_search \
-untuk menemukan, doc_rename untuk mengganti nama, doc_delete untuk menghapus. \
-Dokumen disimpan di folder terpisah dan SENGAJA tidak ikut \
-diindeks ke graf/semantic/MOC, jadi pakai memori untuk fakta atomik yang \
-saling-tertaut, dan dokumen untuk catatan panjang yang dibaca/diedit manusia.";
+Obsidian Vault-based memory server. Each memory is a single Markdown note \
+with frontmatter (name, description, tags, type, links) and a body. Memories \
+are grouped per-project; if the 'project' argument is not provided, the project \
+is detected from the working directory. Use memory_write to store, \
+memory_read/memory_search/memory_list to retrieve, memory_map to \
+regenerate the map (_MOC.md), memory_suggest for smart relation suggestions \
+(based on tag & content similarity), memory_backlinks to see who \
+links to a memory, memory_doctor to check for broken links & orphans, \
+memory_cluster to group memories into themes (graph communities), \
+memory_semantic_search to search by meaning (when the 'semantic' feature is \
+enabled), memory_recall to fetch a unified context package for a topic \
+(semantic + content + graph + theme in a single call), memory_hybrid_search for \
+combined keyword+meaning search, memory_link to add/remove links \
+without rewriting the body, memory_rename to rename a memory while \
+updating all inbound links, and memory_delete to delete. \
+For long documents (spec/runbook/brainstorm/worklog) use the doc_* family: \
+doc_write/doc_append to write, doc_read to read, doc_list/doc_search \
+to find, doc_rename to rename, doc_delete to delete. \
+Documents are stored in a separate folder and are DELIBERATELY not \
+indexed into the graph/semantic/MOC, so use memories for atomic, \
+interlinked facts, and documents for long notes read/edited by humans.";
 
 #[derive(Clone)]
 pub struct ObsidianServer {
     config: Config,
-    // Dipakai oleh macro `#[tool_handler]` lewat ekspansi, bukan dibaca langsung
-    // di kode kita — analisis dead-code tidak melihatnya.
+    // Used by the `#[tool_handler]` macro via expansion, not read directly
+    // in our code — dead-code analysis doesn't see it.
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
-    /// Lock global yang menserialkan semua operasi tulis/baca. rmcp memproses
-    /// request secara konkuren, sementara `memory_write` melakukan
-    /// read-modify-write (membaca file lama untuk mempertahankan `created`, lalu
-    /// menulis ulang) dan setelahnya meregenerasi `_MOC.md` dengan memindai
-    /// seluruh folder. Tanpa lock, dua write ke memori yang sama bisa balapan
-    /// (created hilang) dan regenerasi peta bisa membaca folder yang sedang
-    /// setengah jadi. Lock global ini sederhana & cukup untuk beban single-user.
+    /// Global lock that serializes all write/read operations. rmcp processes
+    /// requests concurrently, while `memory_write` performs a
+    /// read-modify-write (reading the old file to preserve `created`, then
+    /// rewriting) and afterwards regenerates `_MOC.md` by scanning the
+    /// entire folder. Without the lock, two writes to the same memory could race
+    /// (losing `created`) and map regeneration could read a folder that is
+    /// half-finished. This global lock is simple & sufficient for single-user load.
     io_lock: Arc<Mutex<()>>,
 }
 
-// ---- Argumen tiap tool ----
+// ---- Arguments for each tool ----
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct WriteArgs {
-    /// Nama project. Kosongkan untuk deteksi otomatis dari working directory.
+    /// Project name. Leave empty to auto-detect from the working directory.
     #[serde(default)]
     pub project: Option<String>,
-    /// Nama/judul memori (akan dijadikan slug, sekaligus nama file).
+    /// Memory name/title (will be turned into a slug and the file name).
     pub name: String,
-    /// Ringkasan satu baris tentang isi memori ini.
+    /// One-line summary of this memory's content.
     pub description: String,
-    /// Isi memori (Markdown). Boleh memuat [[wikilink]] ke memori lain.
+    /// Memory content (Markdown). May contain [[wikilink]]s to other memories.
     pub body: String,
-    /// Tag untuk pengelompokan (opsional).
+    /// Tags for grouping (optional).
     #[serde(default)]
     pub tags: Option<Vec<String>>,
-    /// Kategori memori: project | reference | decision | note (default: note).
+    /// Memory category: project | reference | decision | note (default: note).
     #[serde(default, rename = "type")]
     pub kind: Option<String>,
-    /// Slug memori lain yang terkait (opsional), dirender sebagai link di peta.
+    /// Slugs of other related memories (optional), rendered as links in the map.
     #[serde(default)]
     pub links: Option<Vec<String>>,
 }
@@ -95,17 +95,17 @@ pub struct WriteArgs {
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct ReadArgs {
-    /// Nama project (opsional, auto-detect bila kosong).
+    /// Project name (optional, auto-detected when empty).
     #[serde(default)]
     pub project: Option<String>,
-    /// Nama/slug memori yang ingin dibaca.
+    /// Name/slug of the memory to read.
     pub name: String,
 }
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct ListArgs {
-    /// Nama project (opsional, auto-detect bila kosong).
+    /// Project name (optional, auto-detected when empty).
     #[serde(default)]
     pub project: Option<String>,
 }
@@ -113,13 +113,13 @@ pub struct ListArgs {
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct SearchArgs {
-    /// Nama project (opsional, auto-detect bila kosong).
+    /// Project name (optional, auto-detected when empty).
     #[serde(default)]
     pub project: Option<String>,
-    /// Kata kunci pencarian (cocokkan ke name/description/tags/body).
+    /// Search keyword (matched against name/description/tags/body).
     #[serde(default)]
     pub query: Option<String>,
-    /// Filter berdasarkan satu tag (opsional).
+    /// Filter by a single tag (optional).
     #[serde(default)]
     pub tag: Option<String>,
 }
@@ -127,7 +127,7 @@ pub struct SearchArgs {
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct MapArgs {
-    /// Nama project (opsional, auto-detect bila kosong).
+    /// Project name (optional, auto-detected when empty).
     #[serde(default)]
     pub project: Option<String>,
 }
@@ -135,30 +135,30 @@ pub struct MapArgs {
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct DeleteArgs {
-    /// Nama project (opsional, auto-detect bila kosong).
+    /// Project name (optional, auto-detected when empty).
     #[serde(default)]
     pub project: Option<String>,
-    /// Nama/slug memori yang ingin dihapus.
+    /// Name/slug of the memory to delete.
     pub name: String,
 }
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct SuggestArgs {
-    /// Nama project (opsional, auto-detect bila kosong).
+    /// Project name (optional, auto-detected when empty).
     #[serde(default)]
     pub project: Option<String>,
-    /// Slug memori tertentu. Bila kosong, beri saran untuk SEMUA memori.
+    /// Slug of a specific memory. If empty, suggest for ALL memories.
     #[serde(default)]
     pub name: Option<String>,
-    /// Maksimum jumlah saran per memori (default 5).
+    /// Maximum number of suggestions per memory (default 5).
     #[serde(default)]
     pub top: Option<usize>,
-    /// Skor kemiripan minimum 0.0–1.0 (default 0.05).
+    /// Minimum similarity score 0.0–1.0 (default 0.05).
     #[serde(default)]
     pub threshold: Option<f64>,
-    /// Bila true DAN `name` diisi: tuliskan saran ke field `links` memori itu
-    /// (union, tanpa duplikat) lalu regenerasi peta.
+    /// If true AND `name` is provided: write the suggestions to that memory's
+    /// `links` field (union, no duplicates) then regenerate the map.
     #[serde(default)]
     pub apply: Option<bool>,
 }
@@ -166,7 +166,7 @@ pub struct SuggestArgs {
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct DoctorArgs {
-    /// Nama project (opsional, auto-detect bila kosong).
+    /// Project name (optional, auto-detected when empty).
     #[serde(default)]
     pub project: Option<String>,
 }
@@ -174,7 +174,7 @@ pub struct DoctorArgs {
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct ClusterArgs {
-    /// Nama project (opsional, auto-detect bila kosong).
+    /// Project name (optional, auto-detected when empty).
     #[serde(default)]
     pub project: Option<String>,
 }
@@ -182,12 +182,12 @@ pub struct ClusterArgs {
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct SemanticSearchArgs {
-    /// Nama project (opsional, auto-detect bila kosong).
+    /// Project name (optional, auto-detected when empty).
     #[serde(default)]
     pub project: Option<String>,
-    /// Kueri pencarian dalam bahasa alami (dicari berdasarkan MAKNA, bukan kata).
+    /// Natural-language search query (searched by MEANING, not words).
     pub query: String,
-    /// Maksimum jumlah hasil (default 5).
+    /// Maximum number of results (default 5).
     #[serde(default)]
     pub top: Option<usize>,
 }
@@ -195,12 +195,12 @@ pub struct SemanticSearchArgs {
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct RecallArgs {
-    /// Nama project (opsional, auto-detect bila kosong).
+    /// Project name (optional, auto-detected when empty).
     #[serde(default)]
     pub project: Option<String>,
-    /// Kueri/topik dalam bahasa alami untuk diingat kembali.
+    /// Natural-language query/topic to recall.
     pub query: String,
-    /// Berapa memori teratas yang diambil & diperkaya (default 3).
+    /// How many top memories to fetch & enrich (default 3).
     #[serde(default)]
     pub top: Option<usize>,
 }
@@ -208,25 +208,25 @@ pub struct RecallArgs {
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct BacklinksArgs {
-    /// Nama project (opsional, auto-detect bila kosong).
+    /// Project name (optional, auto-detected when empty).
     #[serde(default)]
     pub project: Option<String>,
-    /// Slug memori yang ingin dilihat backlink-nya (siapa yang menautnya).
+    /// Slug of the memory whose backlinks to view (who links to it).
     pub name: String,
 }
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct LinkArgs {
-    /// Nama project (opsional, auto-detect bila kosong).
+    /// Project name (optional, auto-detected when empty).
     #[serde(default)]
     pub project: Option<String>,
-    /// Slug memori yang field `links`-nya akan diubah.
+    /// Slug of the memory whose `links` field will be modified.
     pub name: String,
-    /// Slug yang ditambahkan ke `links` (opsional).
+    /// Slugs to add to `links` (optional).
     #[serde(default)]
     pub add: Option<Vec<String>>,
-    /// Slug yang dihapus dari `links` (opsional).
+    /// Slugs to remove from `links` (optional).
     #[serde(default)]
     pub remove: Option<Vec<String>>,
 }
@@ -234,24 +234,24 @@ pub struct LinkArgs {
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct RenameArgs {
-    /// Nama project (opsional, auto-detect bila kosong).
+    /// Project name (optional, auto-detected when empty).
     #[serde(default)]
     pub project: Option<String>,
-    /// Slug memori yang akan diganti namanya.
+    /// Slug of the memory to rename.
     pub name: String,
-    /// Nama/slug baru.
+    /// New name/slug.
     pub new_name: String,
 }
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct HybridSearchArgs {
-    /// Nama project (opsional, auto-detect bila kosong).
+    /// Project name (optional, auto-detected when empty).
     #[serde(default)]
     pub project: Option<String>,
-    /// Kueri pencarian (digabung: kecocokan kata + makna).
+    /// Search query (combined: keyword match + meaning).
     pub query: String,
-    /// Maksimum jumlah hasil (default 5).
+    /// Maximum number of results (default 5).
     #[serde(default)]
     pub top: Option<usize>,
 }
@@ -259,26 +259,26 @@ pub struct HybridSearchArgs {
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct DocWriteArgs {
-    /// Nama project (opsional, auto-detect bila kosong).
+    /// Project name (optional, auto-detected when empty).
     #[serde(default)]
     pub project: Option<String>,
-    /// Nama/judul dokumen (dijadikan slug & nama file).
+    /// Document name/title (turned into a slug & file name).
     pub name: String,
-    /// Jenis dokumen: spec | runbook | brainstorm | worklog (default note).
-    /// Menentukan template awal & mode default bila 'mode' tidak diisi.
+    /// Document type: spec | runbook | brainstorm | worklog (default note).
+    /// Determines the initial template & default mode when 'mode' is not set.
     #[serde(default, rename = "type")]
     pub kind: Option<String>,
-    /// Judul satu baris (disimpan sebagai description). Opsional.
+    /// One-line title (stored as description). Optional.
     #[serde(default)]
     pub title: Option<String>,
-    /// Isi dokumen (Markdown). Kosong pada dokumen baru → pakai template kind.
+    /// Document content (Markdown). Empty on a new document → use the kind template.
     #[serde(default)]
     pub body: Option<String>,
-    /// Tag untuk pengelompokan (opsional).
+    /// Tags for grouping (optional).
     #[serde(default)]
     pub tags: Option<Vec<String>>,
-    /// Mode tulis: "overwrite" atau "append". Kosong → default per-kind
-    /// (brainstorm/worklog = append, lainnya = overwrite).
+    /// Write mode: "overwrite" or "append". Empty → default per-kind
+    /// (brainstorm/worklog = append, others = overwrite).
     #[serde(default)]
     pub mode: Option<String>,
 }
@@ -286,36 +286,36 @@ pub struct DocWriteArgs {
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct DocAppendArgs {
-    /// Nama project (opsional, auto-detect bila kosong).
+    /// Project name (optional, auto-detected when empty).
     #[serde(default)]
     pub project: Option<String>,
-    /// Nama/slug dokumen. Dibuat otomatis dari template bila belum ada.
+    /// Document name/slug. Created automatically from a template if it doesn't exist.
     pub name: String,
-    /// Jenis dokumen bila dokumen baru dibuat (mis. worklog). Opsional bila
-    /// dokumen sudah ada (jenis lama dipertahankan).
+    /// Document type when a new document is created (e.g. worklog). Optional if
+    /// the document already exists (the existing type is preserved).
     #[serde(default, rename = "type")]
     pub kind: Option<String>,
-    /// Isi yang ditambahkan (akan diberi heading ber-timestamp).
+    /// Content to append (will be given a timestamped heading).
     pub body: String,
 }
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct DocReadArgs {
-    /// Nama project (opsional, auto-detect bila kosong).
+    /// Project name (optional, auto-detected when empty).
     #[serde(default)]
     pub project: Option<String>,
-    /// Nama/slug dokumen yang ingin dibaca.
+    /// Name/slug of the document to read.
     pub name: String,
 }
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct DocListArgs {
-    /// Nama project (opsional, auto-detect bila kosong).
+    /// Project name (optional, auto-detected when empty).
     #[serde(default)]
     pub project: Option<String>,
-    /// Filter berdasarkan jenis dokumen (opsional).
+    /// Filter by document type (optional).
     #[serde(default, rename = "type")]
     pub kind: Option<String>,
 }
@@ -323,13 +323,13 @@ pub struct DocListArgs {
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct DocSearchArgs {
-    /// Nama project (opsional, auto-detect bila kosong).
+    /// Project name (optional, auto-detected when empty).
     #[serde(default)]
     pub project: Option<String>,
-    /// Kata kunci pencarian (cocokkan ke name/description/tags/body).
+    /// Search keyword (matched against name/description/tags/body).
     #[serde(default)]
     pub query: Option<String>,
-    /// Filter berdasarkan jenis dokumen (opsional).
+    /// Filter by document type (optional).
     #[serde(default, rename = "type")]
     pub kind: Option<String>,
 }
@@ -337,41 +337,41 @@ pub struct DocSearchArgs {
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct DocDeleteArgs {
-    /// Nama project (opsional, auto-detect bila kosong).
+    /// Project name (optional, auto-detected when empty).
     #[serde(default)]
     pub project: Option<String>,
-    /// Nama/slug dokumen yang ingin dihapus.
+    /// Name/slug of the document to delete.
     pub name: String,
 }
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct DocRenameArgs {
-    /// Nama project (opsional, auto-detect bila kosong).
+    /// Project name (optional, auto-detected when empty).
     #[serde(default)]
     pub project: Option<String>,
-    /// Slug dokumen yang akan diganti namanya.
+    /// Slug of the document to rename.
     pub name: String,
-    /// Nama/slug baru.
+    /// New name/slug.
     pub new_name: String,
 }
 
-/// Ambang cosine untuk menandai dua memori sebagai near-duplicate di doctor.
+/// Cosine threshold for flagging two memories as near-duplicates in doctor.
 const NEAR_DUP_THRESHOLD: f32 = 0.88;
 
 fn err(e: impl std::fmt::Display) -> McpError {
     McpError::internal_error(e.to_string(), None)
 }
 
-/// Tentukan mode tulis dokumen: argumen eksplisit menang; jika kosong, pakai
-/// default per-kind (append untuk brainstorm/worklog, overwrite untuk sisanya).
+/// Determine the document write mode: an explicit argument wins; if empty, use
+/// the per-kind default (append for brainstorm/worklog, overwrite for the rest).
 fn resolve_mode(mode: Option<&str>, kind: &str) -> anyhow::Result<WriteMode> {
     match mode {
         Some(m) => match m.trim().to_lowercase().as_str() {
             "overwrite" => Ok(WriteMode::Overwrite),
             "append" => Ok(WriteMode::Append),
             other => {
-                anyhow::bail!("mode tidak dikenal: '{other}' (gunakan 'overwrite' atau 'append')")
+                anyhow::bail!("unknown mode: '{other}' (use 'overwrite' or 'append')")
             }
         },
         None => Ok(docs::doc_kind(kind)
@@ -390,22 +390,22 @@ impl ObsidianServer {
         }
     }
 
-    /// Lock I/O bersama, agar file watcher (fitur `watch`) bisa menserialkan
-    /// regenerasi peta terhadap operasi tulis tool.
+    /// Shared I/O lock, so the file watcher (the `watch` feature) can serialize
+    /// map regeneration against tool write operations.
     #[cfg(feature = "watch")]
     pub fn io_lock(&self) -> Arc<Mutex<()>> {
         self.io_lock.clone()
     }
 
-    /// Resolve project lalu regenerasi peta setelah perubahan.
+    /// Resolve the project, then regenerate the map after changes.
     fn project_of(&self, explicit: Option<&str>) -> Result<String, McpError> {
         resolve_project(&self.config, explicit).map_err(err)
     }
 
     #[tool(
-        description = "Simpan (buat atau perbarui) satu memori ke Obsidian Vault. \
-        Saat memperbarui, timestamp 'created' dipertahankan dan peta project \
-        diregenerasi otomatis."
+        description = "Store (create or update) a single memory in the Obsidian Vault. \
+        On update, the 'created' timestamp is preserved and the project map \
+        is regenerated automatically."
     )]
     async fn memory_write(
         &self,
@@ -429,8 +429,8 @@ impl ObsidianServer {
 
         regenerate_moc(&self.config, &project).map_err(err)?;
 
-        // Peringatkan (tanpa memblokir) bila memori ini menaut target yang belum
-        // ada — link menggantung sah ala Obsidian, tapi mudah jadi broken link.
+        // Warn (without blocking) if this memory links to a target that doesn't
+        // exist yet — dangling links are valid Obsidian-style, but easily become broken links.
         let memories = memory::load_all(&self.config, &project);
         let existing: std::collections::BTreeSet<String> =
             memories.iter().map(|m| slugify(&m.front.name)).collect();
@@ -441,27 +441,27 @@ impl ObsidianServer {
             .unwrap_or_default();
 
         let verb = if outcome.created {
-            "Dibuat"
+            "Created"
         } else {
-            "Diperbarui"
+            "Updated"
         };
         let mut text = format!(
-            "{verb} memori '{}' di project '{}'.\nPath: {}",
+            "{verb} memory '{}' in project '{}'.\nPath: {}",
             outcome.slug,
             project,
             outcome.path.display()
         );
         if !missing.is_empty() {
             text.push_str(&format!(
-                "\n⚠️ Menaut memori yang belum ada: {}. (Link menggantung — buat \
-                 memori target, atau pakai memory_rename bila namanya bergeser.)",
+                "\n⚠️ Links to memories that don't exist yet: {}. (Dangling links — create \
+                 the target memory, or use memory_rename if its name has shifted.)",
                 missing.join(", ")
             ));
         }
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Baca isi lengkap satu memori (frontmatter + body).")]
+    #[tool(description = "Read the full content of a single memory (frontmatter + body).")]
     async fn memory_read(
         &self,
         Parameters(args): Parameters<ReadArgs>,
@@ -473,7 +473,7 @@ impl ObsidianServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Daftar ringkas semua memori dalam satu project (JSON).")]
+    #[tool(description = "Concise list of all memories in a single project (JSON).")]
     async fn memory_list(
         &self,
         Parameters(args): Parameters<ListArgs>,
@@ -482,14 +482,14 @@ impl ObsidianServer {
         let project = self.project_of(args.project.as_deref())?;
         let entries = memory::list_entries(&self.config, &project);
         let json = serde_json::to_string_pretty(&entries).map_err(err)?;
-        let header = format!("Project '{project}' — {} memori:\n", entries.len());
+        let header = format!("Project '{project}' — {} memories:\n", entries.len());
         Ok(CallToolResult::success(vec![Content::text(format!(
             "{header}{json}"
         ))]))
     }
 
-    #[tool(description = "Cari memori dalam satu project berdasarkan kata kunci \
-        dan/atau tag. Hasil terurut berdasarkan relevansi (JSON).")]
+    #[tool(description = "Search memories in a single project by keyword \
+        and/or tag. Results sorted by relevance (JSON).")]
     async fn memory_search(
         &self,
         Parameters(args): Parameters<SearchArgs>,
@@ -503,15 +503,17 @@ impl ObsidianServer {
             args.tag.as_deref(),
         );
         let json = serde_json::to_string_pretty(&hits).map_err(err)?;
-        let header = format!("Project '{project}' — {} hasil:\n", hits.len());
+        let header = format!("Project '{project}' — {} results:\n", hits.len());
         Ok(CallToolResult::success(vec![Content::text(format!(
             "{header}{json}"
         ))]))
     }
 
-    #[tool(description = "Regenerasi peta memori (_MOC.md) untuk satu project: \
-        dikelompokkan per kategori & tag, plus relasi antar-memori. \
-        Kembalikan isi peta.")]
+    #[tool(
+        description = "Regenerate the memory map (_MOC.md) for a single project: \
+        grouped by category & tag, plus relations between memories. \
+        Returns the map content."
+    )]
     async fn memory_map(
         &self,
         Parameters(args): Parameters<MapArgs>,
@@ -522,13 +524,11 @@ impl ObsidianServer {
         Ok(CallToolResult::success(vec![Content::text(content)]))
     }
 
-    #[tool(
-        description = "Sarankan relasi pintar antar-memori berdasarkan kemiripan \
-        tag (Jaccard) + isi (cosine TF-IDF). Tanpa 'name': saran untuk semua \
-        memori. Dengan 'name' + 'apply: true': tuliskan saran ke field links \
-        memori tersebut. Mengembalikan JSON saran (name, score, shared_tags, \
-        shared_terms)."
-    )]
+    #[tool(description = "Suggest smart relations between memories based on tag \
+        similarity (Jaccard) + content (cosine TF-IDF). Without 'name': suggestions for all \
+        memories. With 'name' + 'apply: true': write the suggestions to that \
+        memory's links field. Returns JSON suggestions (name, score, shared_tags, \
+        shared_terms).")]
     async fn memory_suggest(
         &self,
         Parameters(args): Parameters<SuggestArgs>,
@@ -538,12 +538,12 @@ impl ObsidianServer {
         let top = args.top.unwrap_or(similarity::DEFAULT_TOP_N);
         let threshold = args.threshold.unwrap_or(similarity::DEFAULT_THRESHOLD);
         let memories = memory::load_all(&self.config, &project);
-        // Bila fitur `semantic` aktif, pakai embedding (by makna) untuk komponen
-        // isi; bila tidak, `None` → fallback TF-IDF.
+        // When the `semantic` feature is enabled, use embeddings (by meaning) for the
+        // content component; otherwise, `None` → fall back to TF-IDF.
         let emb = embed::vectors_for(&self.config, &project, &memories);
 
         match args.name {
-            // ---- Saran untuk satu memori (opsional apply ke links) ----
+            // ---- Suggestions for a single memory (optionally apply to links) ----
             Some(name) => {
                 let slug = slugify(&name);
                 let suggestions =
@@ -580,12 +580,12 @@ impl ObsidianServer {
                 let json = serde_json::to_string_pretty(&suggestions).map_err(err)?;
                 let header = if applied.is_empty() {
                     format!(
-                        "Saran untuk '{slug}' di project '{project}' — {} kandidat:\n",
+                        "Suggestions for '{slug}' in project '{project}' — {} candidates:\n",
                         suggestions.len()
                     )
                 } else {
                     format!(
-                        "Ditautkan ke '{slug}': {}.\nSaran lengkap ({} kandidat):\n",
+                        "Linked to '{slug}': {}.\nFull suggestions ({} candidates):\n",
                         applied.join(", "),
                         suggestions.len()
                     )
@@ -594,12 +594,12 @@ impl ObsidianServer {
                     "{header}{json}"
                 ))]))
             }
-            // ---- Saran untuk seluruh project ----
+            // ---- Suggestions for the entire project ----
             None => {
                 let all = similarity::suggest_all_ext(&memories, top, threshold, emb.as_ref());
                 let json = serde_json::to_string_pretty(&all).map_err(err)?;
                 let header = format!(
-                    "Saran relasi project '{project}' — {} memori punya kandidat:\n",
+                    "Relation suggestions for project '{project}' — {} memories have candidates:\n",
                     all.len()
                 );
                 Ok(CallToolResult::success(vec![Content::text(format!(
@@ -609,10 +609,10 @@ impl ObsidianServer {
         }
     }
 
-    #[tool(description = "Periksa kesehatan graf memori sebuah project: temukan \
-        broken link (tautan ke memori yang tidak ada, baik dari field links \
-        maupun [[wikilink]] di body) dan orphan (memori tanpa relasi masuk/keluar). \
-        Read-only. Mengembalikan JSON laporan.")]
+    #[tool(description = "Check the health of a project's memory graph: find \
+        broken links (links to non-existent memories, from either the links field \
+        or [[wikilink]]s in the body) and orphans (memories with no inbound/outbound relations). \
+        Read-only. Returns a JSON report.")]
     async fn memory_doctor(
         &self,
         Parameters(args): Parameters<DoctorArgs>,
@@ -622,8 +622,8 @@ impl ObsidianServer {
         let memories = memory::load_all(&self.config, &project);
         let mut report = links::doctor(&memories);
 
-        // Cross-project: tandai broken link yang targetnya sebenarnya ada di
-        // project lain (kemungkinan salah scope / kandidat rename).
+        // Cross-project: flag broken links whose target actually exists in
+        // another project (likely wrong scope / rename candidate).
         let mut elsewhere: std::collections::BTreeMap<String, String> = Default::default();
         for other in project::list_projects(&self.config) {
             if other == project {
@@ -643,7 +643,7 @@ impl ObsidianServer {
             }
         }
 
-        // Near-duplicate (hanya bila embedding tersedia / fitur semantic).
+        // Near-duplicates (only when embeddings are available / semantic feature).
         let near = self.near_duplicates(&project, &memories);
 
         let mut val = serde_json::to_value(&report).map_err(err)?;
@@ -655,8 +655,8 @@ impl ObsidianServer {
         }
         let json = serde_json::to_string_pretty(&val).map_err(err)?;
         let header = format!(
-            "Project '{project}': {} memori, {} broken link ({} ada di project lain), \
-             {} orphan, {} stub, {} tanpa-desc, {} tanpa-tag, {} near-dup.\n",
+            "Project '{project}': {} memories, {} broken links ({} exist in another project), \
+             {} orphans, {} stubs, {} no-desc, {} no-tags, {} near-dup.\n",
             report.total,
             report.broken_links.len(),
             also_elsewhere,
@@ -671,8 +671,8 @@ impl ObsidianServer {
         ))]))
     }
 
-    /// Pasangan memori dengan kemiripan embedding ≥ `NEAR_DUP_THRESHOLD`.
-    /// Kosong bila fitur `semantic` mati (embedding tak tersedia).
+    /// Pairs of memories with embedding similarity ≥ `NEAR_DUP_THRESHOLD`.
+    /// Empty when the `semantic` feature is off (embeddings unavailable).
     fn near_duplicates(
         &self,
         project: &str,
@@ -699,9 +699,9 @@ impl ObsidianServer {
     }
 
     #[tool(
-        description = "Tampilkan backlink sebuah memori: daftar memori lain yang \
-        menautnya (via field links atau [[wikilink]] di body). Backlink dihitung \
-        dari graf, tidak disimpan ke file. Read-only."
+        description = "Show a memory's backlinks: the list of other memories that \
+        link to it (via the links field or [[wikilink]]s in the body). Backlinks are computed \
+        from the graph, not stored in the file. Read-only."
     )]
     async fn memory_backlinks(
         &self,
@@ -715,7 +715,7 @@ impl ObsidianServer {
         let back = graph.backlinks_of(&slug);
         let json = serde_json::to_string_pretty(&back).map_err(err)?;
         let header = format!(
-            "'{slug}' ditaut oleh {} memori di project '{project}':\n",
+            "'{slug}' is linked by {} memories in project '{project}':\n",
             back.len()
         );
         Ok(CallToolResult::success(vec![Content::text(format!(
@@ -724,9 +724,9 @@ impl ObsidianServer {
     }
 
     #[tool(
-        description = "Kelompokkan memori sebuah project menjadi 'tema' via deteksi \
-        komunitas Louvain pada graf tautan (links + [[wikilink]]). Mengembalikan \
-        JSON: nilai modularity + daftar klaster (anggota per tema). Read-only."
+        description = "Group a project's memories into 'themes' via Louvain community \
+        detection on the link graph (links + [[wikilink]]). Returns \
+        JSON: modularity value + list of clusters (members per theme). Read-only."
     )]
     async fn memory_cluster(
         &self,
@@ -735,13 +735,13 @@ impl ObsidianServer {
         let _guard = self.io_lock.lock().await;
         let project = self.project_of(args.project.as_deref())?;
         let memories = memory::load_all(&self.config, &project);
-        // Bila fitur `semantic` aktif, perkaya graf dengan edge kemiripan
-        // embedding sebelum Louvain; bila tidak, klaster berbasis tautan saja.
+        // When the `semantic` feature is enabled, enrich the graph with embedding
+        // similarity edges before Louvain; otherwise, cluster based on links only.
         let emb = embed::vectors_for(&self.config, &project, &memories);
         let result = cluster::cluster_ext(&memories, emb.as_ref(), cluster::DEFAULT_SIM_THRESHOLD);
         let json = serde_json::to_string_pretty(&result).map_err(err)?;
         let header = format!(
-            "Project '{project}': {} tema (modularity {:.3}).\n",
+            "Project '{project}': {} themes (modularity {:.3}).\n",
             result.clusters.len(),
             result.modularity
         );
@@ -751,11 +751,11 @@ impl ObsidianServer {
     }
 
     #[tool(
-        description = "Pencarian SEMANTIK: temukan memori berdasarkan MAKNA kueri, \
-        bukan kecocokan kata (mis. 'alasan memilih bahasa' menemukan memori soal \
-        'kenapa pakai Rust'). Memakai embedding lokal; index di-cache per project \
-        & di-update otomatis untuk memori yang berubah. Catatan: hanya tersedia \
-        bila server dibangun dengan fitur 'semantic'."
+        description = "SEMANTIC search: find memories by the MEANING of the query, \
+        not word matches (e.g. 'reasons for choosing a language' finds a memory about \
+        'why we use Rust'). Uses local embeddings; the index is cached per project \
+        & auto-updated for changed memories. Note: only available \
+        when the server is built with the 'semantic' feature."
     )]
     async fn memory_semantic_search(
         &self,
@@ -769,7 +769,7 @@ impl ObsidianServer {
             .map_err(err)?;
         let json = serde_json::to_string_pretty(&hits).map_err(err)?;
         let header = format!(
-            "Pencarian semantik '{}' di project '{project}' — {} hasil:\n",
+            "Semantic search '{}' in project '{project}' — {} results:\n",
             args.query,
             hits.len()
         );
@@ -779,11 +779,11 @@ impl ObsidianServer {
     }
 
     #[tool(
-        description = "RECALL konteks terpadu untuk satu topik: cari memori paling \
-        relevan secara semantik, lalu untuk tiap hasil sertakan isi penuh + \
-        tautan keluar + backlink + memori setema. Satu panggilan menggantikan \
-        rangkaian semantic_search→read→backlinks→cluster, menghasilkan paket \
-        konteks siap pakai. Catatan: butuh fitur 'semantic'."
+        description = "RECALL a unified context for a single topic: find the most \
+        semantically relevant memories, then for each result include the full content + \
+        outbound links + backlinks + same-theme memories. A single call replaces the \
+        semantic_search→read→backlinks→cluster sequence, producing a ready-to-use \
+        context package. Note: requires the 'semantic' feature."
     )]
     async fn memory_recall(
         &self,
@@ -795,7 +795,7 @@ impl ObsidianServer {
         let result = recall::recall(&self.config, &project, &args.query, top).map_err(err)?;
         let json = serde_json::to_string_pretty(&result).map_err(err)?;
         let header = format!(
-            "Recall '{}' di project '{project}' — {} memori:\n",
+            "Recall '{}' in project '{project}' — {} memories:\n",
             args.query,
             result.items.len()
         );
@@ -805,10 +805,10 @@ impl ObsidianServer {
     }
 
     #[tool(
-        description = "Tambah/hapus tautan (field `links`) sebuah memori TANPA \
-        menulis ulang body. Beri 'add' dan/atau 'remove' (daftar slug). \
-        Regenerasi peta otomatis. Memperingatkan bila slug yang ditambahkan \
-        belum ada (link menggantung)."
+        description = "Add/remove links (the `links` field) of a memory WITHOUT \
+        rewriting the body. Provide 'add' and/or 'remove' (lists of slugs). \
+        The map is regenerated automatically. Warns when an added slug \
+        doesn't exist yet (dangling link)."
     )]
     async fn memory_link(
         &self,
@@ -860,7 +860,7 @@ impl ObsidianServer {
         .map_err(err)?;
         regenerate_moc(&self.config, &project).map_err(err)?;
 
-        // Peringatkan slug yang ditambahkan tapi belum ada.
+        // Warn about slugs that were added but don't exist yet.
         let existing: std::collections::BTreeSet<String> = memory::load_all(&self.config, &project)
             .iter()
             .map(|m| slugify(&m.front.name))
@@ -871,32 +871,27 @@ impl ObsidianServer {
             .cloned()
             .collect();
 
-        let mut text = format!("Tautan '{self_slug}' diperbarui di project '{project}'.");
+        let mut text = format!("Links for '{self_slug}' updated in project '{project}'.");
         if !added.is_empty() {
-            text.push_str(&format!("\n+ ditambah: {}", added.join(", ")));
+            text.push_str(&format!("\n+ added: {}", added.join(", ")));
         }
         if !removed.is_empty() {
-            text.push_str(&format!("\n- dihapus: {}", removed.join(", ")));
+            text.push_str(&format!("\n- removed: {}", removed.join(", ")));
         }
         if added.is_empty() && removed.is_empty() {
-            text.push_str(" (tidak ada perubahan)");
+            text.push_str(" (no changes)");
         }
         if !dangling.is_empty() {
-            text.push_str(&format!(
-                "\n⚠️ Belum ada targetnya: {}.",
-                dangling.join(", ")
-            ));
+            text.push_str(&format!("\n⚠️ No target yet: {}.", dangling.join(", ")));
         }
-        text.push_str(&format!("\nLinks sekarang: [{}]", links.join(", ")));
+        text.push_str(&format!("\nLinks now: [{}]", links.join(", ")));
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(
-        description = "Ganti nama (slug) sebuah memori DAN perbarui semua tautan \
-        masuk (field links + [[wikilink]] di body) milik memori lain agar tetap \
-        resolve. Timestamp 'created' dipertahankan. Regenerasi peta otomatis. \
-        Gagal bila slug baru sudah dipakai."
-    )]
+    #[tool(description = "Rename (slug) a memory AND update all inbound links \
+        (the links field + [[wikilink]]s in the body) of other memories so they keep \
+        resolving. The 'created' timestamp is preserved. The map is regenerated automatically. \
+        Fails if the new slug is already in use.")]
     async fn memory_rename(
         &self,
         Parameters(args): Parameters<RenameArgs>,
@@ -907,7 +902,7 @@ impl ObsidianServer {
             .map_err(err)?;
         regenerate_moc(&self.config, &project).map_err(err)?;
         let text = format!(
-            "Memori '{}' → '{}' di project '{}'. {} perujuk diperbarui{}.",
+            "Memory '{}' → '{}' in project '{}'. {} referrers updated{}.",
             outcome.old_slug,
             outcome.new_slug,
             project,
@@ -921,13 +916,11 @@ impl ObsidianServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(
-        description = "Pencarian HYBRID: gabungkan kecocokan kata (keyword) dan \
-        makna (semantik) dalam satu ranking — menutup celah keduanya (keyword \
-        gagal pada sinonim; semantik lemah pada parafrasa jauh). Tiap hasil \
-        memuat skor gabungan + komponen keyword & semantic. Bila fitur 'semantic' \
-        mati, otomatis jatuh ke keyword saja (ditandai di header)."
-    )]
+    #[tool(description = "HYBRID search: combine keyword matching and \
+        meaning (semantic) into a single ranking — covering each other's gaps (keyword \
+        fails on synonyms; semantic is weak on distant paraphrases). Each result \
+        carries a combined score + keyword & semantic components. When the 'semantic' \
+        feature is off, it automatically falls back to keyword only (noted in the header).")]
     async fn memory_hybrid_search(
         &self,
         Parameters(args): Parameters<HybridSearchArgs>,
@@ -954,10 +947,10 @@ impl ObsidianServer {
         let mode = if sem_active {
             "keyword+semantic"
         } else {
-            "keyword saja (semantic nonaktif)"
+            "keyword only (semantic disabled)"
         };
         let header = format!(
-            "Pencarian hybrid [{mode}] '{}' di project '{project}' — {} hasil:\n",
+            "Hybrid search [{mode}] '{}' in project '{project}' — {} results:\n",
             args.query,
             hits.len()
         );
@@ -966,7 +959,7 @@ impl ObsidianServer {
         ))]))
     }
 
-    #[tool(description = "Hapus satu memori dari project, lalu regenerasi peta.")]
+    #[tool(description = "Delete a single memory from the project, then regenerate the map.")]
     async fn memory_delete(
         &self,
         Parameters(args): Parameters<DeleteArgs>,
@@ -978,25 +971,22 @@ impl ObsidianServer {
             regenerate_moc(&self.config, &project).map_err(err)?;
         }
         let text = if removed {
-            format!("Memori '{}' dihapus dari project '{}'.", args.name, project)
+            format!("Memory '{}' deleted from project '{}'.", args.name, project)
         } else {
-            format!(
-                "Memori '{}' tidak ditemukan di project '{}'.",
-                args.name, project
-            )
+            format!("Memory '{}' not found in project '{}'.", args.name, project)
         };
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    // ---- Dokumen (folder docs terpisah, tidak terindeks ke graf) ----
+    // ---- Documents (separate docs folder, not indexed into the graph) ----
 
     #[tool(
-        description = "Tulis dokumen panjang (spec/runbook/brainstorm/worklog/dll) \
-        ke folder docs Obsidian — TERPISAH dari memori, jadi tidak ikut diindeks \
-        ke graf/semantic/MOC. 'type' menentukan template awal & mode default. \
-        'mode' overwrite (default spec/runbook) menimpa isi; 'append' (default \
-        brainstorm/worklog) menambah entri ber-timestamp. Saat update, 'created' \
-        dipertahankan."
+        description = "Write a long document (spec/runbook/brainstorm/worklog/etc.) \
+        to the Obsidian docs folder — SEPARATE from memories, so it isn't indexed \
+        into the graph/semantic/MOC. 'type' determines the initial template & default mode. \
+        'mode' overwrite (default spec/runbook) replaces the content; 'append' (default \
+        brainstorm/worklog) adds a timestamped entry. On update, 'created' \
+        is preserved."
     )]
     async fn doc_write(
         &self,
@@ -1023,12 +1013,12 @@ impl ObsidianServer {
         docs::regenerate_docs_index(&self.config, &project).map_err(err)?;
 
         let verb = match (outcome.created, outcome.mode) {
-            (true, _) => "Dibuat",
-            (false, WriteMode::Append) => "Ditambahkan ke",
-            (false, WriteMode::Overwrite) => "Diperbarui",
+            (true, _) => "Created",
+            (false, WriteMode::Append) => "Appended to",
+            (false, WriteMode::Overwrite) => "Updated",
         };
         let text = format!(
-            "{verb} dokumen '{}' di project '{}'.\nPath: {}",
+            "{verb} document '{}' in project '{}'.\nPath: {}",
             outcome.slug,
             project,
             outcome.path.display()
@@ -1036,9 +1026,9 @@ impl ObsidianServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Tambahkan satu entri ber-timestamp ke sebuah dokumen \
-        (mis. worklog/brainstorm). Bila dokumen belum ada, dibuat otomatis dari \
-        template 'type'. Tidak menimpa isi yang ada.")]
+    #[tool(description = "Append a single timestamped entry to a document \
+        (e.g. worklog/brainstorm). If the document doesn't exist, it's created automatically from \
+        the 'type' template. Does not overwrite existing content.")]
     async fn doc_append(
         &self,
         Parameters(args): Parameters<DocAppendArgs>,
@@ -1061,12 +1051,12 @@ impl ObsidianServer {
         docs::regenerate_docs_index(&self.config, &project).map_err(err)?;
 
         let verb = if outcome.created {
-            "Dibuat & ditambahkan ke"
+            "Created & appended to"
         } else {
-            "Ditambahkan ke"
+            "Appended to"
         };
         let text = format!(
-            "{verb} dokumen '{}' di project '{}'.\nPath: {}",
+            "{verb} document '{}' in project '{}'.\nPath: {}",
             outcome.slug,
             project,
             outcome.path.display()
@@ -1074,7 +1064,7 @@ impl ObsidianServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Baca isi lengkap satu dokumen (frontmatter + body).")]
+    #[tool(description = "Read the full content of a single document (frontmatter + body).")]
     async fn doc_read(
         &self,
         Parameters(args): Parameters<DocReadArgs>,
@@ -1087,9 +1077,9 @@ impl ObsidianServer {
     }
 
     #[tool(
-        description = "Daftar ringkas dokumen dalam satu project (JSON), opsional \
-        difilter 'type'. Karena dokumen tidak terindeks ke semantic search, tool \
-        ini adalah cara utama menemukan dokumen yang sudah ada."
+        description = "Concise list of documents in a single project (JSON), optionally \
+        filtered by 'type'. Since documents aren't indexed into semantic search, this tool \
+        is the primary way to find existing documents."
     )]
     async fn doc_list(
         &self,
@@ -1099,17 +1089,15 @@ impl ObsidianServer {
         let project = self.project_of(args.project.as_deref())?;
         let entries = docs::list_docs(&self.config, &project, args.kind.as_deref());
         let json = serde_json::to_string_pretty(&entries).map_err(err)?;
-        let header = format!("Project '{project}' — {} dokumen:\n", entries.len());
+        let header = format!("Project '{project}' — {} documents:\n", entries.len());
         Ok(CallToolResult::success(vec![Content::text(format!(
             "{header}{json}"
         ))]))
     }
 
-    #[tool(
-        description = "Cari dokumen dalam satu project berdasarkan kata kunci \
-        (name/description/tags/body), opsional difilter 'type'. Hasil terurut \
-        berdasarkan relevansi (JSON)."
-    )]
+    #[tool(description = "Search documents in a single project by keyword \
+        (name/description/tags/body), optionally filtered by 'type'. Results sorted \
+        by relevance (JSON).")]
     async fn doc_search(
         &self,
         Parameters(args): Parameters<DocSearchArgs>,
@@ -1123,13 +1111,13 @@ impl ObsidianServer {
             args.kind.as_deref(),
         );
         let json = serde_json::to_string_pretty(&hits).map_err(err)?;
-        let header = format!("Project '{project}' — {} hasil:\n", hits.len());
+        let header = format!("Project '{project}' — {} results:\n", hits.len());
         Ok(CallToolResult::success(vec![Content::text(format!(
             "{header}{json}"
         ))]))
     }
 
-    #[tool(description = "Hapus satu dokumen dari project.")]
+    #[tool(description = "Delete a single document from the project.")]
     async fn doc_delete(
         &self,
         Parameters(args): Parameters<DocDeleteArgs>,
@@ -1142,21 +1130,21 @@ impl ObsidianServer {
         }
         let text = if removed {
             format!(
-                "Dokumen '{}' dihapus dari project '{}'.",
+                "Document '{}' deleted from project '{}'.",
                 args.name, project
             )
         } else {
             format!(
-                "Dokumen '{}' tidak ditemukan di project '{}'.",
+                "Document '{}' not found in project '{}'.",
                 args.name, project
             )
         };
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Ganti nama (slug) sebuah dokumen. Timestamp 'created' \
-        dipertahankan. Tidak ada tautan yang perlu diperbarui karena dokumen \
-        tidak bergraf.")]
+    #[tool(description = "Rename (slug) a document. The 'created' timestamp \
+        is preserved. No links need updating because documents \
+        aren't part of the graph.")]
     async fn doc_rename(
         &self,
         Parameters(args): Parameters<DocRenameArgs>,
@@ -1167,7 +1155,7 @@ impl ObsidianServer {
             docs::rename_doc(&self.config, &project, &args.name, &args.new_name).map_err(err)?;
         docs::regenerate_docs_index(&self.config, &project).map_err(err)?;
         let text = format!(
-            "Dokumen '{}' diganti nama menjadi '{}' di project '{}'.",
+            "Document '{}' renamed to '{}' in project '{}'.",
             out.old_slug, out.new_slug, project
         );
         Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -1181,10 +1169,10 @@ impl ServerHandler for ObsidianServer {
         let extra = if projects.is_empty() {
             String::new()
         } else {
-            format!("\n\nProject yang sudah ada: {}.", projects.join(", "))
+            format!("\n\nExisting projects: {}.", projects.join(", "))
         };
-        // `ServerInfo` bersifat #[non_exhaustive], jadi mulai dari default lalu
-        // ubah field yang diperlukan (bukan dengan struct literal).
+        // `ServerInfo` is #[non_exhaustive], so start from the default then
+        // change the fields we need (rather than a struct literal).
         let mut info = ServerInfo::default();
         info.capabilities = ServerCapabilities::builder()
             .enable_tools()
@@ -1195,8 +1183,8 @@ impl ServerHandler for ObsidianServer {
         info
     }
 
-    // ---- Resources: memori = `memory://<project>/<slug>`,
-    //                 dokumen = `docs://<project>/<slug>` ----
+    // ---- Resources: memory = `memory://<project>/<slug>`,
+    //                 document = `docs://<project>/<slug>` ----
 
     async fn list_resources(
         &self,
@@ -1206,17 +1194,17 @@ impl ServerHandler for ObsidianServer {
         let _guard = self.io_lock.lock().await;
         let mut out = Vec::new();
         for project in project::list_projects(&self.config) {
-            // peta project
+            // project map
             out.push(
                 RawResource::new(
                     resources::uri_for(&project, "_MOC"),
-                    format!("{project} / peta"),
+                    format!("{project} / map"),
                 )
-                .with_description(format!("Peta memori (MOC) project {project}"))
+                .with_description(format!("Memory map (MOC) for project {project}"))
                 .with_mime_type(resources::MIME_MARKDOWN)
                 .no_annotation(),
             );
-            // tiap memori
+            // each memory
             for entry in memory::list_entries(&self.config, &project) {
                 out.push(
                     RawResource::new(
@@ -1230,8 +1218,8 @@ impl ServerHandler for ObsidianServer {
             }
         }
 
-        // Resource dokumen: indeks `_DOCS` + tiap dokumen per project. Project
-        // docs dienumerasi terpisah karena bisa berbeda dari project memori.
+        // Document resources: the `_DOCS` index + each document per project. Doc
+        // projects are enumerated separately because they can differ from memory projects.
         for project in project::list_doc_projects(&self.config) {
             let entries = docs::list_docs(&self.config, &project, None);
             if entries.is_empty() {
@@ -1240,9 +1228,9 @@ impl ServerHandler for ObsidianServer {
             out.push(
                 RawResource::new(
                     resources::docs_uri_for(&project, "_DOCS"),
-                    format!("{project} / indeks dokumen"),
+                    format!("{project} / document index"),
                 )
-                .with_description(format!("Indeks dokumen project {project}"))
+                .with_description(format!("Document index for project {project}"))
                 .with_mime_type(resources::MIME_MARKDOWN)
                 .no_annotation(),
             );
@@ -1273,14 +1261,11 @@ impl ServerHandler for ObsidianServer {
     ) -> Result<ReadResourceResult, McpError> {
         let _guard = self.io_lock.lock().await;
 
-        // Skema `memory://` → memori/peta; `docs://` → dokumen/indeks.
+        // Scheme `memory://` → memory/map; `docs://` → document/index.
         let text = if let Some(r) = resources::parse_uri(&request.uri) {
             if r.slug == "_MOC" {
                 std::fs::read_to_string(self.config.moc_file(&r.project)).map_err(|e| {
-                    McpError::invalid_params(
-                        format!("peta '{}' tidak ditemukan: {e}", r.project),
-                        None,
-                    )
+                    McpError::invalid_params(format!("map '{}' not found: {e}", r.project), None)
                 })?
             } else {
                 let mem = memory::read_memory(&self.config, &r.project, &r.slug).map_err(err)?;
@@ -1290,7 +1275,7 @@ impl ServerHandler for ObsidianServer {
             if r.slug == "_DOCS" {
                 std::fs::read_to_string(self.config.docs_index_file(&r.project)).map_err(|e| {
                     McpError::invalid_params(
-                        format!("indeks dokumen '{}' tidak ditemukan: {e}", r.project),
+                        format!("document index '{}' not found: {e}", r.project),
                         None,
                     )
                 })?
@@ -1300,7 +1285,7 @@ impl ServerHandler for ObsidianServer {
             }
         } else {
             return Err(McpError::invalid_params(
-                format!("URI resource tidak valid: {}", request.uri),
+                format!("invalid resource URI: {}", request.uri),
                 None,
             ));
         };
@@ -1312,7 +1297,7 @@ impl ServerHandler for ObsidianServer {
         .with_mime_type(resources::MIME_MARKDOWN)]))
     }
 
-    // ---- Prompts: template siap-pakai untuk bekerja dengan memori ----
+    // ---- Prompts: ready-to-use templates for working with memories ----
 
     async fn list_prompts(
         &self,
@@ -1347,7 +1332,7 @@ impl ServerHandler for ObsidianServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<GetPromptResult, McpError> {
         let _guard = self.io_lock.lock().await;
-        // argumen `project` opsional → resolve seperti tool lain.
+        // the `project` argument is optional → resolve like other tools.
         let arg_project = request
             .arguments
             .as_ref()
@@ -1376,7 +1361,7 @@ impl ServerHandler for ObsidianServer {
             }
             other => {
                 return Err(McpError::invalid_params(
-                    format!("prompt tidak dikenal: {other}"),
+                    format!("unknown prompt: {other}"),
                     None,
                 ))
             }
@@ -1384,10 +1369,7 @@ impl ServerHandler for ObsidianServer {
 
         let mut result =
             GetPromptResult::new(vec![PromptMessage::new_text(PromptMessageRole::User, text)]);
-        result.description = Some(format!(
-            "Prompt '{}' untuk project '{project}'",
-            request.name
-        ));
+        result.description = Some(format!("Prompt '{}' for project '{project}'", request.name));
         Ok(result)
     }
 }
@@ -1415,10 +1397,10 @@ mod tests {
         })
     }
 
-    /// Banyak write konkuren ke memori yang berbeda harus menghasilkan file
-    /// valid (frontmatter utuh, tepat 1 baris `created:`) dan `_MOC.md` yang
-    /// konsisten — peta tidak boleh kehilangan entri karena diregenerasi
-    /// bersamaan dengan write lain.
+    /// Many concurrent writes to different memories must produce valid files
+    /// (intact frontmatter, exactly 1 `created:` line) and a consistent
+    /// `_MOC.md` — the map must not lose entries because it was regenerated
+    /// concurrently with another write.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_writes_distinct_files() {
         let srv = tmp_server();
@@ -1431,8 +1413,8 @@ mod tests {
                 s.memory_write(Parameters(WriteArgs {
                     project: Some("demo".into()),
                     name: format!("Memo {i}"),
-                    description: format!("deskripsi {i}"),
-                    body: format!("isi memori nomor {i}"),
+                    description: format!("description {i}"),
+                    body: format!("memory content number {i}"),
                     tags: Some(vec![format!("t{i}")]),
                     kind: None,
                     links: None,
@@ -1448,28 +1430,25 @@ mod tests {
         for i in 0..N {
             let path = srv.config.memory_file("demo", &format!("memo-{i}"));
             let raw = std::fs::read_to_string(&path)
-                .unwrap_or_else(|_| panic!("file hilang: {}", path.display()));
+                .unwrap_or_else(|_| panic!("missing file: {}", path.display()));
             let created = raw.lines().filter(|l| l.starts_with("created:")).count();
-            assert_eq!(created, 1, "file korup ({}):\n{raw}", path.display());
+            assert_eq!(created, 1, "corrupt file ({}):\n{raw}", path.display());
             let mem = crate::memory::Memory::from_file_string(&raw)
-                .unwrap_or_else(|e| panic!("gagal parse {}: {e}\n{raw}", path.display()));
+                .unwrap_or_else(|e| panic!("failed to parse {}: {e}\n{raw}", path.display()));
             assert_eq!(mem.front.name, format!("memo-{i}"));
         }
-        // _MOC.md harus memuat seluruh 32 entri (regenerasi tidak kehilangan data).
+        // _MOC.md must contain all 32 entries (regeneration loses no data).
         let moc = std::fs::read_to_string(srv.config.moc_file("demo")).unwrap();
         for i in 0..N {
-            assert!(
-                moc.contains(&format!("[[memo-{i}]]")),
-                "MOC kehilangan memo-{i}"
-            );
+            assert!(moc.contains(&format!("[[memo-{i}]]")), "MOC lost memo-{i}");
         }
     }
 
-    /// Inilah race yang sebenarnya dijaga oleh `io_lock`: banyak write konkuren
-    /// ke SLUG yang sama. Tiap write membaca file lama untuk mempertahankan
-    /// `created`, lalu menulis ulang. Tanpa serialisasi, langkah ini bisa balapan
-    /// dan menghasilkan frontmatter ganda/rusak. Dengan lock, hasil akhir tetap
-    /// satu file valid dengan tepat 1 baris `created:`.
+    /// This is the actual race that `io_lock` guards against: many concurrent
+    /// writes to the same SLUG. Each write reads the old file to preserve
+    /// `created`, then rewrites. Without serialization, this step can race
+    /// and produce duplicate/corrupt frontmatter. With the lock, the final result
+    /// is still a single valid file with exactly 1 `created:` line.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_writes_same_slug() {
         let srv = tmp_server();
@@ -1482,7 +1461,7 @@ mod tests {
                 s.memory_write(Parameters(WriteArgs {
                     project: Some("demo".into()),
                     name: "Same Note".into(),
-                    description: format!("revisi {i}"),
+                    description: format!("revision {i}"),
                     body: format!("body {i}"),
                     tags: None,
                     kind: None,
@@ -1501,7 +1480,7 @@ mod tests {
         assert_eq!(
             raw.lines().filter(|l| l.starts_with("created:")).count(),
             1,
-            "frontmatter rusak akibat race:\n{raw}"
+            "frontmatter corrupted by a race:\n{raw}"
         );
         let mem = crate::memory::Memory::from_file_string(&raw).unwrap();
         assert_eq!(mem.front.name, "same-note");
@@ -1514,7 +1493,7 @@ mod tests {
             project: Some("demo".into()),
             name: "Hello".into(),
             description: "world".into(),
-            body: "isi".into(),
+            body: "content".into(),
             tags: Some(vec!["x".into()]),
             kind: Some("note".into()),
             links: None,
@@ -1523,7 +1502,13 @@ mod tests {
         .unwrap();
 
         let moc = std::fs::read_to_string(srv.config.moc_file("demo")).unwrap();
-        assert!(moc.contains("[[hello]]"), "MOC tidak memuat memori:\n{moc}");
-        assert!(moc.contains("#x"), "MOC tidak memuat indeks tag:\n{moc}");
+        assert!(
+            moc.contains("[[hello]]"),
+            "MOC does not contain the memory:\n{moc}"
+        );
+        assert!(
+            moc.contains("#x"),
+            "MOC does not contain the tag index:\n{moc}"
+        );
     }
 }

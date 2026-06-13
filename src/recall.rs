@@ -1,18 +1,18 @@
-//! `recall`: retrieval konteks terpadu untuk AI agent.
+//! `recall`: unified context retrieval for AI agents.
 //!
-//! Menggabungkan tiga kemampuan yang sudah ada menjadi SATU panggilan, agar
-//! agent tidak perlu merangkai sendiri (search → read → backlinks → cluster):
+//! Combines three existing capabilities into ONE call, so the agent does not have
+//! to chain them together itself (search → read → backlinks → cluster):
 //!
-//! 1. **Pencarian semantik** (`embed::semantic_search`) → top-K memori paling
-//!    relevan dengan query (berdasarkan makna).
-//! 2. Untuk tiap hit, lampirkan **isi penuh** (body) + **tetangga graf**
-//!    (tautan keluar & backlink, via `links::LinkGraph`).
-//! 3. **Tema** (`cluster`) tiap hit + daftar memori setema lainnya.
+//! 1. **Semantic search** (`embed::semantic_search`) → the top-K memories most
+//!    relevant to the query (based on meaning).
+//! 2. For each hit, attach its **full content** (body) + **graph neighbors**
+//!    (outgoing links & backlinks, via `links::LinkGraph`).
+//! 3. The **theme** (`cluster`) of each hit + a list of other memories in the same theme.
 //!
-//! Hasilnya satu payload terstruktur siap dijadikan konteks LLM.
+//! The result is a single structured payload ready to be used as LLM context.
 //!
-//! Catatan: bergantung pada `embed::semantic_search`, jadi memerlukan build
-//! dengan fitur `semantic`. Tanpa fitur itu, error diteruskan apa adanya.
+//! Note: depends on `embed::semantic_search`, so it requires a build with the
+//! `semantic` feature. Without that feature, the error is propagated as-is.
 
 use crate::cluster;
 use crate::config::Config;
@@ -23,27 +23,27 @@ use crate::project::slugify;
 use serde::Serialize;
 use std::collections::HashMap;
 
-/// Satu memori dalam hasil recall, lengkap dengan konteks grafnya.
+/// A single memory in the recall result, complete with its graph context.
 #[derive(Debug, Clone, Serialize)]
 pub struct RecallItem {
     pub name: String,
     pub description: String,
-    /// Relevansi semantik terhadap query (cosine similarity).
+    /// Semantic relevance to the query (cosine similarity).
     pub score: f32,
     #[serde(rename = "type")]
     pub kind: String,
     pub tags: Vec<String>,
-    /// Isi penuh memori (body Markdown).
+    /// Full content of the memory (Markdown body).
     pub body: String,
-    /// Memori yang ditaut oleh item ini (tautan keluar yang valid).
+    /// Memories linked to by this item (valid outgoing links).
     pub links: Vec<String>,
-    /// Memori yang menaut item ini (backlink).
+    /// Memories that link to this item (backlinks).
     pub backlinks: Vec<String>,
-    /// Memori lain yang setema (satu klaster) dengan item ini.
+    /// Other memories in the same theme (same cluster) as this item.
     pub theme: Vec<String>,
 }
 
-/// Hasil recall lengkap.
+/// The complete recall result.
 #[derive(Debug, Clone, Serialize)]
 pub struct RecallResult {
     pub query: String,
@@ -51,8 +51,8 @@ pub struct RecallResult {
     pub items: Vec<RecallItem>,
 }
 
-/// Lakukan recall: cari memori relevan dengan `query`, lalu perkaya tiap hasil
-/// dengan isi penuh + tetangga graf + tema.
+/// Perform recall: find memories relevant to `query`, then enrich each result
+/// with its full content + graph neighbors + theme.
 pub fn recall(
     config: &Config,
     project: &str,
@@ -61,14 +61,14 @@ pub fn recall(
 ) -> anyhow::Result<RecallResult> {
     let memories = memory::load_all(config, project);
 
-    // 1. Retrieval semantik (meneruskan error bila fitur `semantic` mati).
+    // 1. Semantic retrieval (propagates the error if the `semantic` feature is disabled).
     let hits = embed::semantic_search(config, project, query, top, &memories)?;
 
-    // 2. Struktur pendukung dihitung sekali untuk semua hit.
+    // 2. Supporting structures computed once for all hits.
     let graph = LinkGraph::build(&memories);
     let clustering = cluster::cluster(&memories);
 
-    // slug → indeks klaster, agar pencarian tema O(1).
+    // slug → cluster index, so theme lookup is O(1).
     let mut theme_of: HashMap<String, usize> = HashMap::new();
     for (i, c) in clustering.clusters.iter().enumerate() {
         for m in &c.members {
@@ -76,13 +76,13 @@ pub fn recall(
         }
     }
 
-    // slug → memori, untuk akses isi penuh.
+    // slug → memory, for accessing the full content.
     let by_slug: HashMap<String, &Memory> = memories
         .iter()
         .map(|m| (slugify(&m.front.name), m))
         .collect();
 
-    // 3. Rakit tiap hit menjadi RecallItem.
+    // 3. Assemble each hit into a RecallItem.
     let mut items = Vec::with_capacity(hits.len());
     for hit in hits {
         let slug = &hit.name;
@@ -93,7 +93,7 @@ pub fn recall(
             None => (String::new(), Vec::new(), String::new()),
         };
 
-        // Tautan keluar yang valid (menunjuk memori yang ada).
+        // Valid outgoing links (pointing to memories that exist).
         let links: Vec<String> = graph
             .forward
             .get(slug)
@@ -107,7 +107,7 @@ pub fn recall(
 
         let backlinks = graph.backlinks_of(slug);
 
-        // Teman setema (anggota klaster yang sama, tanpa dirinya sendiri).
+        // Same-theme peers (members of the same cluster, excluding itself).
         let theme = theme_of
             .get(slug)
             .map(|&i| {
@@ -164,8 +164,8 @@ mod tests {
         }
     }
 
-    // Tanpa fitur `semantic`, recall harus meneruskan error semantic_search
-    // (bukan panik), karena retrieval inti tak tersedia.
+    // Without the `semantic` feature, recall must propagate the semantic_search
+    // error (not panic), because the core retrieval is unavailable.
     #[cfg(not(feature = "semantic"))]
     #[test]
     fn recall_without_feature_errors() {
@@ -184,7 +184,7 @@ mod tests {
         )
         .unwrap();
 
-        let res = recall(&cfg, "demo", "apa pun", 3);
+        let res = recall(&cfg, "demo", "anything", 3);
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("--features semantic"));
     }

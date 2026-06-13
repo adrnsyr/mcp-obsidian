@@ -3,47 +3,48 @@
 [![CI](https://github.com/adrnsyr/mcp-obsidian/actions/workflows/ci.yml/badge.svg)](https://github.com/adrnsyr/mcp-obsidian/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-MCP server (Rust) untuk **menulis, membaca, mencari, dan memetakan memori
-per-project** ke dalam sebuah [Obsidian](https://obsidian.md) Vault.
+MCP server (Rust) for **writing, reading, searching, and mapping per-project
+memory** into an [Obsidian](https://obsidian.md) Vault.
 
-Setiap memori disimpan sebagai satu file Markdown biasa dengan frontmatter YAML,
-sehingga langsung bisa dibuka, di-link, dan divisualisasikan di Obsidian
-(Graph View, tags, backlinks). Tidak ada database — vault-mu tetap portabel.
+Each memory is stored as a plain Markdown file with YAML frontmatter, so it can
+be opened, linked, and visualized directly in Obsidian (Graph View, tags,
+backlinks). No database — your vault stays portable.
 
-Server mengekspos ketiga kapabilitas MCP: **tools** (CRUD + analisis),
-**resources** (tiap memori bisa di-attach sebagai konteks), dan **prompts**
-(alur kerja siap-pakai berbasis isi memori).
+The server exposes all three MCP capabilities: **tools** (CRUD + analysis),
+**resources** (each memory can be attached as context), and **prompts**
+(ready-to-use workflows based on memory content).
 
-## Konsep
+## Concept
 
 ```
 <Obsidian Vault>/
 ├── memory/                  # OBSIDIAN_MEMORY_ROOT (default: "memory")
-│   ├── proyek-a/            # satu folder per project
-│   │   ├── _MOC.md          # peta (Map of Content) — digenerate otomatis
-│   │   ├── auth-flow.md     # satu memori = satu catatan
+│   ├── project-a/           # one folder per project
+│   │   ├── _MOC.md          # map (Map of Content) — auto-generated
+│   │   ├── auth-flow.md     # one memory = one note
 │   │   └── deploy-pipeline.md
-│   └── proyek-b/
+│   └── project-b/
 │       └── ...
 └── docs/                    # OBSIDIAN_DOCS_ROOT (default: "docs")
-    └── proyek-a/            # dokumen panjang, TERPISAH dari graf memori
-        ├── _DOCS.md         # indeks dokumen — digenerate otomatis
+    └── project-a/           # long documents, SEPARATE from the memory graph
+        ├── _DOCS.md         # document index — auto-generated
         ├── login-spec.md    # spec / runbook / brainstorm / worklog
         └── sprint-log.md
 ```
 
-**Memori vs dokumen.** Memori adalah fakta atomik yang saling-tertaut dan ikut
-diindeks ke graf, semantic search, & `_MOC.md`. Dokumen adalah catatan panjang
-(spec, runbook, brainstorm, worklog) yang disimpan di root terpisah dan **sengaja
-tidak** diindeks — supaya teks panjang tidak mencemari kualitas pencarian & peta.
-Karena itu dokumen ditemukan lewat `doc_list`/`doc_search`, bukan semantic search.
+**Memory vs document.** A memory is an atomic, interlinked fact that is indexed
+into the graph, semantic search, and `_MOC.md`. A document is a long note
+(spec, runbook, brainstorm, worklog) stored in a separate root and **deliberately
+not** indexed — so that long text does not pollute the quality of search and the
+map. For that reason, documents are found via `doc_list`/`doc_search`, not
+semantic search.
 
-Contoh isi satu memori (`auth-flow.md`):
+Example contents of a single memory (`auth-flow.md`):
 
 ```markdown
 ---
 name: auth-flow
-description: Cara kerja autentikasi
+description: How authentication works
 tags:
 - auth
 - security
@@ -54,87 +55,88 @@ created: 2026-05-30T22:40:00+07:00
 updated: 2026-05-30T22:40:00+07:00
 ---
 
-Pakai JWT. Lihat [[deploy-pipeline]].
+Use JWT. See [[deploy-pipeline]].
 ```
 
-`_MOC.md` dibuat ulang otomatis setiap kali ada perubahan: dikelompokkan per
-kategori (`type`), plus bagian **🔗 Relasi** (tautan keluar), **⬅️ Backlink**
-(tautan masuk, dihitung otomatis), **🏷️ Indeks Tag**, **💡 Saran Relasi**, dan
-**🧩 Tema** (klaster komunitas).
+`_MOC.md` is rebuilt automatically whenever something changes: grouped by
+category (`type`), plus the sections **🔗 Relations** (outgoing links),
+**⬅️ Backlinks** (incoming links, auto-counted), **🏷️ Tag Index**,
+**💡 Suggested Relations**, and **🧩 Themes** (community clusters).
 
-## Tools yang disediakan
+## Tools
 
-| Tool | Fungsi |
-|------|--------|
-| `memory_write` | Buat/perbarui satu memori (regenerasi peta otomatis) |
-| `memory_read` | Baca isi lengkap satu memori |
-| `memory_list` | Daftar ringkas semua memori dalam project (JSON) |
-| `memory_search` | Cari berdasarkan kata kunci dan/atau tag |
-| `memory_map` | Regenerasi `_MOC.md` & kembalikan isinya |
-| `memory_suggest` | **Relasi pintar**: usulkan tautan antar-memori berdasarkan kemiripan tag + isi (opsi `apply` untuk menulis ke `links`) |
-| `memory_backlinks` | Tampilkan memori mana yang menaut sebuah memori (dihitung dari graf) |
-| `memory_doctor` | Periksa kesehatan graf: broken link (+ deteksi lintas-project), orphan, **stub**, metadata kosong, & **near-duplicate** (read-only) |
-| `memory_cluster` | Kelompokkan memori jadi **tema** via komunitas graf (Louvain, read-only) |
-| `memory_semantic_search` | Cari berdasarkan **makna** via embedding lokal (perlu feature `semantic`) |
-| `memory_hybrid_search` | **Hybrid**: gabungkan kecocokan kata + makna dalam satu ranking (jatuh ke keyword bila `semantic` mati) |
-| `memory_recall` | **Recall terpadu**: semantik + isi penuh + graf + tema dalam satu panggilan (perlu feature `semantic`) |
-| `memory_link` | Tambah/hapus tautan (`links`) **tanpa menulis ulang body**; memperingatkan link menggantung |
-| `memory_rename` | Ganti nama memori **dan** perbarui semua tautan masuk (field + `[[wikilink]]`); `created` dipertahankan |
-| `memory_delete` | Hapus satu memori (regenerasi peta otomatis) |
+| Tool | Function |
+|------|----------|
+| `memory_write` | Create/update a single memory (auto-regenerates the map) |
+| `memory_read` | Read the full contents of a single memory |
+| `memory_list` | Concise list of all memories in a project (JSON) |
+| `memory_search` | Search by keyword and/or tag |
+| `memory_map` | Regenerate `_MOC.md` and return its contents |
+| `memory_suggest` | **Smart relations**: propose links between memories based on tag + content similarity (option `apply` to write into `links`) |
+| `memory_backlinks` | Show which memories link to a given memory (computed from the graph) |
+| `memory_doctor` | Check graph health: broken links (+ cross-project detection), orphans, **stubs**, empty metadata, & **near-duplicates** (read-only) |
+| `memory_cluster` | Group memories into **themes** via graph communities (Louvain, read-only) |
+| `memory_semantic_search` | Search by **meaning** via local embeddings (requires the `semantic` feature) |
+| `memory_hybrid_search` | **Hybrid**: combine keyword and semantic matching in a single ranking (falls back to keyword when `semantic` is off) |
+| `memory_recall` | **Unified recall**: semantic + full content + graph + themes in one call (requires the `semantic` feature) |
+| `memory_link` | Add/remove links (`links`) **without rewriting the body**; warns about dangling links |
+| `memory_rename` | Rename a memory **and** update all incoming links (field + `[[wikilink]]`); `created` is preserved |
+| `memory_delete` | Delete a single memory (auto-regenerates the map) |
 
-### Dokumen (folder `docs/` terpisah, tidak terindeks ke graf)
+### Documents (separate `docs/` folder, not indexed into the graph)
 
-| Tool | Fungsi |
-|------|--------|
-| `doc_write` | Tulis dokumen panjang. `type` (spec/runbook/brainstorm/worklog) menentukan template awal & mode default; `mode` `overwrite`/`append` bisa dioverride |
-| `doc_append` | Tambah entri ber-timestamp ke dokumen (auto-create dari template bila belum ada) — cocok untuk worklog/brainstorm |
-| `doc_read` | Baca isi lengkap satu dokumen |
-| `doc_list` | Daftar ringkas dokumen (opsi filter `type`) — **cara utama menemukan dokumen** karena tak terindeks |
-| `doc_search` | Cari dokumen berdasarkan kata kunci (opsi filter `type`) |
-| `doc_rename` | Ganti nama (slug) dokumen; `created` dipertahankan |
-| `doc_delete` | Hapus satu dokumen |
+| Tool | Function |
+|------|----------|
+| `doc_write` | Write a long document. `type` (spec/runbook/brainstorm/worklog) sets the initial template & default mode; `mode` `overwrite`/`append` can be overridden |
+| `doc_append` | Add a timestamped entry to a document (auto-creates from template if it doesn't exist) — ideal for worklog/brainstorm |
+| `doc_read` | Read the full contents of a single document |
+| `doc_list` | Concise list of documents (optional `type` filter) — **the primary way to find documents**, since they are not indexed |
+| `doc_search` | Search documents by keyword (optional `type` filter) |
+| `doc_rename` | Rename (slug) a document; `created` is preserved |
+| `doc_delete` | Delete a single document |
 
-Mode default per `type`: `brainstorm`/`worklog` → **append**, `spec`/`runbook` → **overwrite**.
+Default mode per `type`: `brainstorm`/`worklog` → **append**, `spec`/`runbook` → **overwrite**.
 
-Pada setiap tool, argumen `project` **opsional**. Bila kosong, project ditentukan
-berurutan dari: argumen → `OBSIDIAN_DEFAULT_PROJECT` → nama folder working
-directory tempat server dijalankan.
+On every tool, the `project` argument is **optional**. If empty, the project is
+determined in order from: the argument → `OBSIDIAN_DEFAULT_PROJECT` → the name
+of the working directory where the server is run.
 
 ## Resources
 
-Memori **dan** dokumen diekspos sebagai MCP **resource** ber-URI, sehingga klien
-bisa me-list dan "attach" isinya langsung sebagai konteks tanpa memanggil tool.
+Memories **and** documents are exposed as URI-addressed MCP **resources**, so
+clients can list and "attach" their contents directly as context without calling
+a tool.
 
-| URI | Isi |
-|-----|-----|
-| `memory://<project>/<slug>` | Satu memori (frontmatter + body) |
-| `memory://<project>/_MOC` | Peta (Map of Content) project |
-| `docs://<project>/<slug>` | Satu dokumen (frontmatter + body) |
-| `docs://<project>/_DOCS` | Indeks dokumen project (digenerate otomatis) |
+| URI | Contents |
+|-----|----------|
+| `memory://<project>/<slug>` | A single memory (frontmatter + body) |
+| `memory://<project>/_MOC` | The project's map (Map of Content) |
+| `docs://<project>/<slug>` | A single document (frontmatter + body) |
+| `docs://<project>/_DOCS` | The project's document index (auto-generated) |
 
-MIME type: `text/markdown`. Lihat lewat `resources/list` & `resources/read`.
-Indeks `_DOCS.md` diregenerasi otomatis setiap `doc_write`/`doc_append`/`doc_rename`/`doc_delete`.
+MIME type: `text/markdown`. Browse via `resources/list` & `resources/read`.
+The `_DOCS.md` index is regenerated automatically on every `doc_write`/`doc_append`/`doc_rename`/`doc_delete`.
 
 ## Prompts
 
-Tiga **prompt** siap-pakai yang merakit konteks dari isi memori. Semua menerima
-argumen opsional `project` (auto-detect bila kosong).
+Three ready-to-use **prompts** that assemble context from memory content. All
+accept an optional `project` argument (auto-detected if empty).
 
-| Prompt | Fungsi |
-|--------|--------|
-| `summarize-project` | Rangkum seluruh memori project jadi ikhtisar singkat |
-| `review-decisions` | Tinjau memori bertipe `decision` & nilai relevansinya |
-| `onboard` | Jelaskan project ke anggota baru berdasarkan memori yang ada |
+| Prompt | Function |
+|--------|----------|
+| `summarize-project` | Summarize all of a project's memories into a brief overview |
+| `review-decisions` | Review memories of type `decision` & assess their relevance |
+| `onboard` | Explain the project to a new member based on existing memories |
 
-## Konfigurasi (environment variable)
+## Configuration (environment variables)
 
-| Variabel | Wajib | Default | Keterangan |
-|----------|:-----:|---------|------------|
-| `OBSIDIAN_VAULT_PATH` | ✅ | — | Path absolut ke folder Obsidian Vault |
-| `OBSIDIAN_MEMORY_ROOT` | | `memory` | Subfolder di dalam vault untuk memori |
-| `OBSIDIAN_DOCS_ROOT` | | `docs` | Subfolder di dalam vault untuk dokumen (terpisah dari memori) |
-| `OBSIDIAN_DEFAULT_PROJECT` | | — | Project default bila auto-detect gagal |
-| `RUST_LOG` | | `info` | Level log (ditulis ke stderr) |
+| Variable | Required | Default | Description |
+|----------|:--------:|---------|-------------|
+| `OBSIDIAN_VAULT_PATH` | ✅ | — | Absolute path to the Obsidian Vault folder |
+| `OBSIDIAN_MEMORY_ROOT` | | `memory` | Subfolder inside the vault for memories |
+| `OBSIDIAN_DOCS_ROOT` | | `docs` | Subfolder inside the vault for documents (separate from memories) |
+| `OBSIDIAN_DEFAULT_PROJECT` | | — | Default project when auto-detection fails |
+| `RUST_LOG` | | `info` | Log level (written to stderr) |
 
 ## Build
 
@@ -143,41 +145,43 @@ cargo build --release
 # binary: target/release/mcp-obsidian
 ```
 
-### Build dengan pencarian semantik (opsional)
+### Build with semantic search (optional)
 
-Pencarian semantik (`memory_semantic_search`) bersifat **opt-in** lewat cargo
-feature `semantic` agar build default tetap ringan & offline:
+Semantic search (`memory_semantic_search`) is **opt-in** via the cargo feature
+`semantic`, so the default build stays lightweight & offline:
 
 ```bash
 cargo build --release --features semantic
 ```
 
-Build ini menyertakan embedding lokal **pure-Rust** (candle). Saat dipakai
-pertama kali, model multilingual `paraphrase-multilingual-MiniLM-L12-v2`
-(~470 MB) diunduh sekali ke cache HuggingFace (`~/.cache/huggingface`), lalu
-berjalan offline. Model multilingual dipilih agar memori non-Inggris (mis.
-bahasa Indonesia) tetap dicari dengan benar berdasarkan makna. Tanpa feature ini,
-tool `memory_semantic_search` tetap terdaftar tapi mengembalikan pesan yang
-menjelaskan cara mengaktifkannya.
+This build bundles **pure-Rust** local embeddings (candle). On first use, the
+multilingual model `paraphrase-multilingual-MiniLM-L12-v2` (~470 MB) is
+downloaded once into the HuggingFace cache (`~/.cache/huggingface`), then runs
+offline. A multilingual model was chosen so that non-English memories (e.g.
+Indonesian) are still searched correctly by meaning. Without this feature, the
+`memory_semantic_search` tool remains registered but returns a message
+explaining how to enable it.
 
-> Saat fitur `semantic` aktif, `memory_suggest` & `memory_cluster` juga otomatis
-> memakai embedding (by makna); tanpa fitur, keduanya fallback ke TF-IDF/graf.
+> When the `semantic` feature is active, `memory_suggest` & `memory_cluster`
+> also automatically use embeddings (by meaning); without the feature, both fall
+> back to TF-IDF/graph.
 
-### Build dengan auto-sync (opsional)
+### Build with auto-sync (optional)
 
-File watcher (fitur `watch`) memantau folder memori dan **meregenerasi `_MOC.md`
-otomatis** saat memori diedit langsung di Obsidian (di luar tool MCP):
+The file watcher (the `watch` feature) monitors the memory folder and
+**regenerates `_MOC.md` automatically** when memories are edited directly in
+Obsidian (outside the MCP tools):
 
 ```bash
 cargo build --release --features watch
 ```
 
-Memakai `notify` (FSEvents/inotify) dengan debounce 2 detik untuk meredam
-ledakan event saat editor menyimpan. File yang dihasilkan server sendiri
-(`_MOC.md`, dotfile) diabaikan sehingga tak terjadi loop. Fitur bisa digabung:
+It uses `notify` (FSEvents/inotify) with a 2-second debounce to dampen the burst
+of events when an editor saves. Files produced by the server itself (`_MOC.md`,
+dotfiles) are ignored so no loop occurs. The features can be combined:
 `cargo build --release --features "semantic watch"`.
 
-## Mendaftarkan ke Claude Code
+## Registering with Claude Code
 
 ```bash
 claude mcp add obsidian-memory \
@@ -185,7 +189,7 @@ claude mcp add obsidian-memory \
   -- /path/to/mcp-obsidian/target/release/mcp-obsidian
 ```
 
-Atau secara manual di `~/.claude.json` / config MCP klien lain:
+Or manually in `~/.claude.json` / another MCP client's config:
 
 ```json
 {
@@ -200,154 +204,160 @@ Atau secara manual di `~/.claude.json` / config MCP klien lain:
 }
 ```
 
-> Ganti `/path/to/...` sesuai sistemmu. Contoh `OBSIDIAN_VAULT_PATH` per OS:
-> macOS `~/Documents/Obsidian Vault`, Linux `~/obsidian/vault`,
-> Windows `C:\Users\<nama>\Documents\Obsidian Vault`.
+> Replace `/path/to/...` to match your system. Example `OBSIDIAN_VAULT_PATH` per
+> OS: macOS `~/Documents/Obsidian Vault`, Linux `~/obsidian/vault`,
+> Windows `C:\Users\<name>\Documents\Obsidian Vault`.
 
-> Catatan: log sengaja ditulis ke **stderr** karena **stdout** dipakai protokol
-> MCP (JSON-RPC). Jangan menulis apa pun ke stdout.
+> Note: logs are intentionally written to **stderr** because **stdout** is used
+> by the MCP protocol (JSON-RPC). Do not write anything to stdout.
 
-## Pengembangan & test
+## Development & testing
 
 ```bash
-cargo test          # menjalankan unit + integration test
+cargo test          # runs unit + integration tests
 ```
 
-Test mencakup roundtrip tulis/baca, pelestarian timestamp `created`
-saat update, search/list, generasi peta, skor relasi pintar, ekstraksi wikilink &
-graf backlink, parsing URI resource, render prompt, serta **regression test
-konkurensi**: karena `memory_write` melakukan read-modify-write lalu meregenerasi
-`_MOC.md`, semua operasi diserialkan lewat sebuah mutex (`io_lock`) agar tidak
-ada write yang balapan & peta tidak terbaca setengah jadi.
+The tests cover write/read roundtrips, preservation of the `created` timestamp
+on update, search/list, map generation, smart-relation scoring, wikilink
+extraction & backlink graph, resource URI parsing, prompt rendering, and a
+**concurrency regression test**: because `memory_write` performs a
+read-modify-write and then regenerates `_MOC.md`, all operations are serialized
+through a mutex (`io_lock`) so that no writes race and the map is never read
+half-built.
 
-## Struktur kode
+## Code structure
 
-| File | Tanggung jawab |
+| File | Responsibility |
 |------|----------------|
-| `src/main.rs` | Entry point: setup logging (stderr) + serve via stdio |
-| `src/config.rs` | Resolusi konfigurasi & path dari environment |
-| `src/project.rs` | Slugify + deteksi project (arg → env → cwd) |
-| `src/memory.rs` | Frontmatter, CRUD memori, search |
-| `src/docs.rs` | Dokumen panjang (spec/runbook/brainstorm/worklog): write/append/read/list/search di folder terpisah |
-| `src/mapping.rs` | Generasi `_MOC.md` (relasi + backlink + tag + saran + tema) |
-| `src/similarity.rs` | Relasi pintar: skor kemiripan TF-IDF (isi) + Jaccard (tag) |
-| `src/links.rs` | Graf tautan: ekstraksi wikilink, backlink, broken link & orphan |
-| `src/cluster.rs` | Klaster tema: deteksi komunitas Louvain (modularity) |
-| `src/embed.rs` | Pencarian semantik: embedding candle + index sidecar (feature `semantic`) |
-| `src/recall.rs` | Recall terpadu: rangkai semantic + graf + tema jadi satu payload |
-| `src/watcher.rs` | File watcher: auto-regen `_MOC.md` saat edit eksternal (feature `watch`) |
-| `src/resources.rs` | URI resource (`memory://…`) + parsing |
-| `src/prompts.rs` | Katalog prompt + render teksnya |
-| `src/server.rs` | Definisi MCP server: tools, resources, prompts (rmcp) |
+| `src/main.rs` | Entry point: set up logging (stderr) + serve via stdio |
+| `src/config.rs` | Resolve configuration & paths from the environment |
+| `src/project.rs` | Slugify + project detection (arg → env → cwd) |
+| `src/memory.rs` | Frontmatter, memory CRUD, search |
+| `src/docs.rs` | Long documents (spec/runbook/brainstorm/worklog): write/append/read/list/search in a separate folder |
+| `src/mapping.rs` | `_MOC.md` generation (relations + backlinks + tags + suggestions + themes) |
+| `src/similarity.rs` | Smart relations: TF-IDF (content) + Jaccard (tags) similarity scoring |
+| `src/links.rs` | Link graph: wikilink extraction, backlinks, broken links & orphans |
+| `src/cluster.rs` | Theme clustering: Louvain community detection (modularity) |
+| `src/embed.rs` | Semantic search: candle embeddings + sidecar index (feature `semantic`) |
+| `src/recall.rs` | Unified recall: assemble semantic + graph + themes into a single payload |
+| `src/watcher.rs` | File watcher: auto-regenerate `_MOC.md` on external edits (feature `watch`) |
+| `src/resources.rs` | Resource URIs (`memory://…`) + parsing |
+| `src/prompts.rs` | Prompt catalog + text rendering |
+| `src/server.rs` | MCP server definition: tools, resources, prompts (rmcp) |
 
-## Relasi pintar (`memory_suggest`)
+## Smart relations (`memory_suggest`)
 
-Selain tautan manual (field `links`), server bisa **menyarankan** tautan secara
-otomatis dengan menggabungkan dua sinyal kemiripan:
+Beyond manual links (the `links` field), the server can **suggest** links
+automatically by combining two similarity signals:
 
-- **Kemiripan tag** — Jaccard pada himpunan tag: `|A∩B| / |A∪B|`
-- **Kemiripan isi** — cosine similarity pada `name + description + body`.
-  Bila build memakai fitur `semantic`, ini memakai **embedding** (by makna);
-  selain itu fallback ke vektor **TF-IDF** (token dinormalkan, stopword ID/EN).
+- **Tag similarity** — Jaccard over the tag sets: `|A∩B| / |A∪B|`
+- **Content similarity** — cosine similarity over `name + description + body`.
+  If the build uses the `semantic` feature, this uses **embeddings** (by
+  meaning); otherwise it falls back to **TF-IDF** vectors (normalized tokens,
+  ID/EN stopwords).
 
-Skor akhir = `0.6 · tag + 0.4 · isi`. Memori yang sudah ada di `links` di-skip,
-hasil di-ranking dan dipotong ke top-N di atas threshold. Tiap saran
-**explainable**: ikut melaporkan `shared_tags` & `shared_terms`.
+Final score = `0.6 · tag + 0.4 · content`. Memories already present in `links`
+are skipped, results are ranked and cut to top-N above a threshold. Each
+suggestion is **explainable**: it also reports `shared_tags` & `shared_terms`.
 
 ```jsonc
-// Saran untuk semua memori di project (read-only)
+// Suggestions for all memories in the project (read-only)
 {"name": "memory_suggest", "arguments": {"project": "demo"}}
 
-// Saran untuk satu memori + langsung tulis ke field links
+// Suggestions for a single memory + write directly into the links field
 {"name": "memory_suggest", "arguments": {"project": "demo", "name": "auth-flow", "apply": true}}
 
-// Atur jumlah & ambang: top 3, skor minimal 0.1
+// Tune count & threshold: top 3, minimum score 0.1
 {"name": "memory_suggest", "arguments": {"project": "demo", "top": 3, "threshold": 0.1}}
 ```
 
-`_MOC.md` juga otomatis menampilkan bagian **💡 Saran Relasi** (usulan, bukan
-tautan nyata sampai kamu `apply`).
+`_MOC.md` also automatically shows a **💡 Suggested Relations** section
+(suggestions, not real links until you `apply`).
 
-## Klaster / Tema (`memory_cluster`)
+## Clusters / Themes (`memory_cluster`)
 
-Memori dikelompokkan menjadi **tema** lewat deteksi komunitas **Louvain** pada
-graf tautan tak-berarah (dibangun dari field `links` + `[[wikilink]]` di body;
-bobot edge diakumulasi bila ada beberapa tautan antar pasangan yang sama).
-Bila build memakai fitur `semantic`, graf juga diperkaya **edge kemiripan
-embedding** (pasangan dengan cosine ≥ 0.6) sebelum Louvain — sehingga tema
-terbentuk dari tautan **dan** kedekatan makna, bukan hanya tautan eksplisit.
+Memories are grouped into **themes** via **Louvain** community detection on the
+undirected link graph (built from the `links` field + `[[wikilink]]` in the
+body; edge weights accumulate when there are multiple links between the same
+pair). If the build uses the `semantic` feature, the graph is also enriched with
+**embedding-similarity edges** (pairs with cosine ≥ 0.6) before Louvain — so
+themes form from links **and** semantic proximity, not just explicit links.
 
-Louvain memaksimalkan **modularity** Q:
+Louvain maximizes **modularity** Q:
 
 ```text
 Q = Σ_c [ Σ_in(c) / 2m − ( Σ_tot(c) / 2m )² ]
 ```
 
-dengan `Σ_in` bobot edge internal komunitas, `Σ_tot` total derajat komunitas,
-dan `m` total bobot edge. Makin tinggi Q (maks ~1.0), makin tegas pemisahan
-komunitasnya. Memori tanpa tautan menjadi komunitas singleton-nya sendiri.
+where `Σ_in` is the weight of a community's internal edges, `Σ_tot` is the
+community's total degree, and `m` is the total edge weight. The higher Q (max
+~1.0), the sharper the community separation. A memory with no links becomes its
+own singleton community.
 
 ```jsonc
-// Kelompokkan memori project jadi tema (read-only)
+// Group the project's memories into themes (read-only)
 {"name": "memory_cluster", "arguments": {"project": "demo"}}
 ```
 
-> Catatan: `Q = 0` itu wajar bila semua memori yang tertaut membentuk **satu
-> komponen terhubung tanpa sub-struktur** — tidak ada "komunitas dalam komunitas"
-> untuk dipisah. Q naik begitu muncul beberapa kelompok yang relatif terpisah.
+> Note: `Q = 0` is normal when all linked memories form **one connected
+> component with no sub-structure** — there is no "community within a community"
+> to split. Q rises as soon as several relatively separate groups appear.
 
-`_MOC.md` menampilkan bagian **🧩 Tema** bila ada lebih dari satu klaster
-bermakna.
+`_MOC.md` shows a **🧩 Themes** section when there is more than one meaningful
+cluster.
 
-## Pencarian semantik (`memory_semantic_search`)
+## Semantic search (`memory_semantic_search`)
 
-> Memerlukan build `--features semantic` (lihat bagian Build).
+> Requires a `--features semantic` build (see the Build section).
 
-Berbeda dari `memory_search` (cocok-kata), pencarian semantik menemukan memori
-berdasarkan **makna**. Contoh: kueri `"alasan memilih bahasa pemrograman"`
-menemukan memori berjudul *"Kenapa pakai Rust"* walau tak ada kata yang sama.
+Unlike `memory_search` (keyword-matching), semantic search finds memories by
+**meaning**. For example, the query `"reasons for choosing a programming
+language"` finds a memory titled *"Why we use Rust"* even though no words match.
 
-Cara kerja:
+> Full design notes (how embeddings work, the multilingual model decision,
+> real-world test results, & technical notes): see [semantic.md](semantic.md).
 
-- Tiap memori (`name + description + body`) di-embed jadi vektor 384-dimensi
-  dengan model multilingual **paraphrase-multilingual-MiniLM-L12-v2** (candle,
-  pure-Rust, lokal) — mendukung 50+ bahasa termasuk Indonesia.
-- Vektor di-cache di file sidecar `memory/<project>/.embeddings.json`. Hanya
-  memori yang **berubah** (deteksi via hash isi) yang di-embed ulang — jadi
-  pencarian berikutnya cepat.
-- Relevansi = cosine similarity antara vektor kueri dan tiap memori; hasil
-  diurutkan dari paling relevan.
+How it works:
+
+- Each memory (`name + description + body`) is embedded into a 384-dimensional
+  vector with the multilingual model **paraphrase-multilingual-MiniLM-L12-v2**
+  (candle, pure-Rust, local) — supporting 50+ languages including Indonesian.
+- Vectors are cached in the sidecar file `memory/<project>/.embeddings.json`.
+  Only **changed** memories (detected via a content hash) are re-embedded — so
+  subsequent searches are fast.
+- Relevance = cosine similarity between the query vector and each memory; results
+  are ordered from most relevant.
 
 ```jsonc
 {"name": "memory_semantic_search",
- "arguments": {"project": "demo", "query": "kenapa pilih arsitektur ini", "top": 5}}
+ "arguments": {"project": "demo", "query": "why this architecture was chosen", "top": 5}}
 ```
 
-File `.embeddings.json` adalah cache murni — aman dihapus (akan dibangun ulang)
-dan tidak dianggap sebagai memori.
+The `.embeddings.json` file is a pure cache — safe to delete (it will be rebuilt)
+and not treated as a memory.
 
-## Recall terpadu (`memory_recall`)
+## Unified recall (`memory_recall`)
 
-> Memerlukan build `--features semantic` (lihat bagian Build).
+> Requires a `--features semantic` build (see the Build section).
 
-`memory_recall` adalah **retrieval konteks satu-panggilan** untuk AI agent. Alih-alih
-merangkai sendiri `semantic_search` → `read` → `backlinks` → `cluster`, satu
-panggilan mengembalikan paket konteks yang sudah diperkaya:
+`memory_recall` is a **single-call context retrieval** for AI agents. Instead of
+chaining `semantic_search` → `read` → `backlinks` → `cluster` yourself, a single
+call returns an already-enriched context package:
 
-1. **Pencarian semantik** → ambil top-K memori paling relevan dengan kueri.
-2. Untuk tiap hasil, lampirkan **isi penuh** (body) + **tautan keluar** +
-   **backlink** (dari graf) + **memori setema** (dari klaster).
+1. **Semantic search** → take the top-K memories most relevant to the query.
+2. For each result, attach the **full content** (body) + **outgoing links** +
+   **backlinks** (from the graph) + **same-theme memories** (from the cluster).
 
 ```jsonc
 {"name": "memory_recall",
- "arguments": {"project": "demo", "query": "kenapa proyek ini memakai bahasa Rust", "top": 3}}
+ "arguments": {"project": "demo", "query": "why this project uses the Rust language", "top": 3}}
 ```
 
-Tiap item hasil berisi: `name`, `description`, `score` (relevansi semantik),
-`type`, `tags`, `body`, `links`, `backlinks`, `theme`. Cocok dijadikan konteks
-langsung untuk LLM tanpa langkah tambahan.
+Each result item contains: `name`, `description`, `score` (semantic relevance),
+`type`, `tags`, `body`, `links`, `backlinks`, `theme`. Ideal to use directly as
+context for an LLM with no extra steps.
 
-## Lisensi
+## License
 
-Dirilis di bawah lisensi [MIT](LICENSE). Bebas dipakai, dimodifikasi, dan
-didistribusikan ulang.
+Released under the [MIT](LICENSE) license. Free to use, modify, and
+redistribute.

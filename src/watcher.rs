@@ -1,18 +1,18 @@
-//! Auto-sync: pantau folder memori dan regenerasi `_MOC.md` saat memori diedit
-//! langsung di Obsidian (di luar tool MCP).
+//! Auto-sync: watch the memory folder and regenerate `_MOC.md` when a memory is
+//! edited directly in Obsidian (outside the MCP tools).
 //!
-//! Fitur ini **opt-in** lewat cargo feature `watch`. Tanpa feature itu, modul
-//! kosong (tidak ada dependency `notify` di build default).
+//! This feature is **opt-in** via the cargo feature `watch`. Without that feature,
+//! the module is empty (no `notify` dependency in the default build).
 //!
-//! Desain:
-//! - Pantau `<vault>/<memory_root>` rekursif memakai `notify-debouncer-full`
-//!   (meredam ledakan event dari atomic-save editor).
-//! - Saat ada perubahan file `.md` milik user, tentukan project dari path lalu
-//!   regenerasi `_MOC.md` project itu.
-//! - File yang kita tulis sendiri (`_MOC.md`, dotfile seperti `.embeddings.json`)
-//!   **diabaikan** agar tidak terjadi loop tak-berujung.
-//! - Regenerasi memakai `io_lock` yang sama dengan server, supaya tidak balapan
-//!   dengan operasi tulis dari tool.
+//! Design:
+//! - Watch `<vault>/<memory_root>` recursively using `notify-debouncer-full`
+//!   (damping the burst of events from an editor's atomic save).
+//! - When a user's `.md` file changes, determine the project from the path and
+//!   regenerate that project's `_MOC.md`.
+//! - Files we write ourselves (`_MOC.md`, dotfiles such as `.embeddings.json`)
+//!   are **ignored** to avoid an endless loop.
+//! - Regeneration uses the same `io_lock` as the server, so it does not race
+//!   with write operations from the tools.
 
 #[cfg(feature = "watch")]
 mod imp {
@@ -26,19 +26,19 @@ mod imp {
     use std::time::Duration;
     use tokio::sync::{mpsc, Mutex};
 
-    /// Handle watcher yang harus tetap hidup selama server berjalan. Bila
-    /// di-drop, pemantauan berhenti (RAII).
+    /// Watcher handle that must stay alive while the server is running. When
+    /// dropped, watching stops (RAII).
     pub struct WatchGuard {
         _debouncer: Debouncer<RecommendedWatcher, RecommendedCache>,
     }
 
-    /// Mulai memantau folder memori. Mengembalikan guard yang harus disimpan
-    /// (jangan di-drop) selama server hidup.
+    /// Start watching the memory folder. Returns a guard that must be kept
+    /// (not dropped) for as long as the server lives.
     pub fn spawn(config: Config, io_lock: Arc<Mutex<()>>) -> anyhow::Result<WatchGuard> {
         let mem_dir = config.memory_dir();
-        ensure_dir(&mem_dir)?; // notify gagal bila path belum ada
+        ensure_dir(&mem_dir)?; // notify fails if the path does not yet exist
 
-        // Channel: callback (thread notify, sinkron) → consumer (task tokio).
+        // Channel: callback (notify thread, synchronous) → consumer (tokio task).
         let (tx, mut rx) = mpsc::channel::<PathBuf>(256);
 
         let mut debouncer = new_debouncer(
@@ -55,7 +55,7 @@ mod imp {
                         }
                         for path in &ev.paths {
                             if is_user_memory(path) {
-                                // try_send: jangan pernah blok thread notify.
+                                // try_send: never block the notify thread.
                                 let _ = tx.try_send(path.clone());
                             }
                         }
@@ -70,9 +70,9 @@ mod imp {
         )?;
 
         debouncer.watch(&mem_dir, RecursiveMode::Recursive)?;
-        tracing::info!(dir = %mem_dir.display(), "file watcher aktif (auto-regen _MOC.md)");
+        tracing::info!(dir = %mem_dir.display(), "file watcher active (auto-regenerate _MOC.md)");
 
-        // Consumer: regenerasi peta project yang memorinya berubah.
+        // Consumer: regenerate the map of the project whose memory changed.
         tokio::spawn(async move {
             while let Some(path) = rx.recv().await {
                 let Some(project) = project_of_path(&config, &path) else {
@@ -81,9 +81,9 @@ mod imp {
                 let _guard = io_lock.lock().await;
                 match regenerate_moc(&config, &project) {
                     Ok(_) => {
-                        tracing::info!(project = %project, "peta diregenerasi (edit eksternal)")
+                        tracing::info!(project = %project, "map regenerated (external edit)")
                     }
-                    Err(e) => tracing::warn!(project = %project, "gagal regen peta: {e}"),
+                    Err(e) => tracing::warn!(project = %project, "failed to regenerate map: {e}"),
                 }
             }
         });
@@ -93,8 +93,8 @@ mod imp {
         })
     }
 
-    /// True bila path adalah file memori milik user: berekstensi `.md`, bukan
-    /// `_MOC.md`, dan tidak ada komponen dotfile (mis. `.embeddings.json`,
+    /// True if the path is a user's memory file: has the `.md` extension, is not
+    /// `_MOC.md`, and has no dotfile component (e.g. `.embeddings.json`,
     /// `.obsidian/`).
     fn is_user_memory(path: &Path) -> bool {
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
@@ -108,7 +108,7 @@ mod imp {
             .all(|seg| !seg.starts_with('.'))
     }
 
-    /// Tentukan nama project dari path file di dalam folder memori:
+    /// Determine the project name from a file path inside the memory folder:
     /// `<vault>/<memory_root>/<project>/<slug>.md` → `project`.
     fn project_of_path(config: &Config, path: &Path) -> Option<String> {
         let rel = path.strip_prefix(config.memory_dir()).ok()?;
@@ -137,11 +137,11 @@ mod imp {
         #[test]
         fn detects_user_memory_files() {
             assert!(is_user_memory(Path::new("/vault/memory/proj/auth-flow.md")));
-            // bukan .md
+            // not .md
             assert!(!is_user_memory(Path::new("/vault/memory/proj/note.txt")));
-            // file peta kita sendiri
+            // our own map file
             assert!(!is_user_memory(Path::new("/vault/memory/proj/_MOC.md")));
-            // dotfile / folder dot
+            // dotfile / dot folder
             assert!(!is_user_memory(Path::new(
                 "/vault/memory/proj/.embeddings.json"
             )));
@@ -155,14 +155,14 @@ mod imp {
                 project_of_path(&c, Path::new("/vault/memory/demo/auth-flow.md")).as_deref(),
                 Some("demo")
             );
-            // di luar folder memori → None
+            // outside the memory folder → None
             assert_eq!(project_of_path(&c, Path::new("/other/place/file.md")), None);
         }
     }
 }
 
-// `WatchGuard` di-re-export sebagai tipe (disimpan di main agar hidup); namanya
-// tak dirujuk eksplisit di tempat lain, jadi bungkam unused-import.
+// `WatchGuard` is re-exported as a type (held in main to keep it alive); its name
+// is not referenced explicitly elsewhere, so silence the unused-import warning.
 #[cfg(feature = "watch")]
 #[allow(unused_imports)]
 pub use imp::{spawn, WatchGuard};

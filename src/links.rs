@@ -1,40 +1,40 @@
-//! Analisis graf tautan antar-memori: ekstraksi wikilink, backlink (derived),
-//! deteksi broken link & orphan.
+//! Analysis of the inter-memory link graph: wikilink extraction, backlinks
+//! (derived), broken link & orphan detection.
 //!
-//! Tautan keluar (outgoing) satu memori berasal dari DUA sumber:
-//! 1. field `links` di frontmatter (relasi eksplisit/terstruktur), dan
-//! 2. `[[wikilink]]` yang ditulis di dalam body.
+//! A memory's outgoing links come from TWO sources:
+//! 1. the `links` field in the frontmatter (explicit/structured relations), and
+//! 2. `[[wikilink]]`s written in the body.
 //!
-//! Backlink TIDAK pernah disimpan ke file — selalu dihitung dari graf agar
-//! konsisten (ini cara native Obsidian). Saat A menaut B, B otomatis "ditaut
-//! oleh A" tanpa menyentuh file B.
+//! Backlinks are NEVER stored to a file — they are always computed from the
+//! graph for consistency (this is Obsidian's native approach). When A links to
+//! B, B is automatically "linked by A" without touching B's file.
 
 use crate::memory::Memory;
 use crate::project::slugify;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Ekstrak target wikilink `[[...]]` dari sebuah teks body.
+/// Extract `[[...]]` wikilink targets from a body text.
 ///
-/// Mendukung bentuk Obsidian: `[[nama]]`, `[[nama|alias]]`, `[[nama#heading]]`.
-/// Hanya bagian `nama` yang diambil (sebelum `|` atau `#`), lalu di-slugify.
-/// Embed `![[...]]` juga ikut tertangkap (kurung `[[` tetap cocok).
+/// Supports the Obsidian forms: `[[name]]`, `[[name|alias]]`, `[[name#heading]]`.
+/// Only the `name` part is taken (before `|` or `#`), then slugified.
+/// Embeds `![[...]]` are also captured (the `[[` bracket still matches).
 pub fn extract_wikilinks(body: &str) -> Vec<String> {
     let bytes = body.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
     while i + 1 < bytes.len() {
         if bytes[i] == b'[' && bytes[i + 1] == b'[' {
-            // cari penutup "]]"
+            // find the closing "]]"
             if let Some(rel_end) = body[i + 2..].find("]]") {
                 let inner = &body[i + 2..i + 2 + rel_end];
-                // ambil sebelum '|' (alias) dan '#' (heading)
+                // take the part before '|' (alias) and '#' (heading)
                 let target = inner.split(['|', '#']).next().unwrap_or("").trim();
                 let slug = slugify(target);
                 if !slug.is_empty() {
                     out.push(slug);
                 }
-                i = i + 2 + rel_end + 2; // lompat ke setelah "]]"
+                i = i + 2 + rel_end + 2; // jump to just after "]]"
                 continue;
             }
         }
@@ -43,8 +43,8 @@ pub fn extract_wikilinks(body: &str) -> Vec<String> {
     out
 }
 
-/// Gabungan tautan keluar sebuah memori (field `links` ∪ wikilink di body),
-/// sudah di-slugify, unik, dan tidak menunjuk diri sendiri. Terurut.
+/// The combined outgoing links of a memory (`links` field ∪ wikilinks in the
+/// body), slugified, unique, and not pointing to itself. Sorted.
 pub fn outgoing_links(mem: &Memory) -> Vec<String> {
     let self_slug = slugify(&mem.front.name);
     let mut set: BTreeSet<String> = BTreeSet::new();
@@ -62,18 +62,18 @@ pub fn outgoing_links(mem: &Memory) -> Vec<String> {
     set.into_iter().collect()
 }
 
-/// Graf tautan satu project.
+/// The link graph of a single project.
 pub struct LinkGraph {
-    /// Semua slug memori yang benar-benar ada.
+    /// All memory slugs that actually exist.
     pub existing: BTreeSet<String>,
-    /// slug -> tautan keluar (sudah difilter; bisa memuat target tak-ada).
+    /// slug -> outgoing links (already filtered; may contain non-existent targets).
     pub forward: BTreeMap<String, Vec<String>>,
-    /// slug -> daftar memori yang menautnya (backlink, derived).
+    /// slug -> list of memories linking to it (backlinks, derived).
     pub backward: BTreeMap<String, Vec<String>>,
 }
 
 impl LinkGraph {
-    /// Bangun graf dari seluruh memori sebuah project.
+    /// Build the graph from all of a project's memories.
     pub fn build(memories: &[Memory]) -> Self {
         let existing: BTreeSet<String> = memories.iter().map(|m| slugify(&m.front.name)).collect();
 
@@ -84,7 +84,7 @@ impl LinkGraph {
             let from = slugify(&m.front.name);
             let outs = outgoing_links(m);
             for to in &outs {
-                // backlink hanya bermakna bila target ada.
+                // a backlink is only meaningful when the target exists.
                 if existing.contains(to) {
                     backward.entry(to.clone()).or_default().push(from.clone());
                 }
@@ -92,7 +92,7 @@ impl LinkGraph {
             forward.insert(from, outs);
         }
 
-        // jaga determinisme.
+        // keep it deterministic.
         for v in backward.values_mut() {
             v.sort();
             v.dedup();
@@ -105,40 +105,41 @@ impl LinkGraph {
         }
     }
 
-    /// Backlink untuk satu slug (kosong bila tidak ada).
+    /// Backlinks for a single slug (empty when there are none).
     pub fn backlinks_of(&self, slug: &str) -> Vec<String> {
         self.backward.get(slug).cloned().unwrap_or_default()
     }
 }
 
-/// Satu broken link: memori `from` menunjuk `to` yang tidak ada.
+/// A single broken link: memory `from` points to a `to` that does not exist.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct BrokenLink {
     pub from: String,
     pub to: String,
-    /// Diisi oleh pemanggil (server) bila target sebenarnya ADA di project lain
-    /// — membedakan "salah scope/perlu rename" dari "benar-benar hilang".
+    /// Filled in by the caller (server) when the target actually DOES exist in
+    /// another project — distinguishing "wrong scope / needs rename" from
+    /// "genuinely missing".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub also_in_project: Option<String>,
 }
 
-/// Laporan kesehatan graf memori sebuah project.
+/// Health report for a project's memory graph.
 #[derive(Debug, Clone, Serialize)]
 pub struct DoctorReport {
     pub total: usize,
-    /// Tautan ke memori yang tidak ada (di body atau field links).
+    /// Links to non-existent memories (in the body or the links field).
     pub broken_links: Vec<BrokenLink>,
-    /// Memori tanpa tautan keluar maupun masuk (terisolasi dari graf).
+    /// Memories with neither outgoing nor incoming links (isolated from the graph).
     pub orphans: Vec<String>,
-    /// Memori yang tampak sebagai stub/placeholder (perlu diisi).
+    /// Memories that appear to be stubs/placeholders (need filling in).
     pub stubs: Vec<String>,
-    /// Memori tanpa description.
+    /// Memories without a description.
     pub no_description: Vec<String>,
-    /// Memori tanpa tag.
+    /// Memories without tags.
     pub no_tags: Vec<String>,
 }
 
-/// Apakah memori tampak sebagai stub/placeholder yang belum berisi.
+/// Whether a memory appears to be an empty stub/placeholder.
 fn is_stub(m: &Memory) -> bool {
     if m.front.kind.eq_ignore_ascii_case("stub") {
         return true;
@@ -147,11 +148,11 @@ fn is_stub(m: &Memory) -> bool {
         return true;
     }
     let upper = m.body.to_uppercase();
-    upper.contains("PERLU DIISI") || upper.contains("⚠️ STUB")
+    upper.contains("TO BE FILLED IN") || upper.contains("⚠️ STUB")
 }
 
-/// Slug tautan keluar `mem` yang menunjuk memori yang TIDAK ada di `existing`.
-/// Dipakai untuk memperingatkan link menggantung saat menulis memori.
+/// Outgoing link slugs of `mem` that point to memories NOT present in `existing`.
+/// Used to warn about dangling links when writing a memory.
 pub fn missing_targets(mem: &Memory, existing: &BTreeSet<String>) -> Vec<String> {
     outgoing_links(mem)
         .into_iter()
@@ -159,9 +160,9 @@ pub fn missing_targets(mem: &Memory, existing: &BTreeSet<String>) -> Vec<String>
         .collect()
 }
 
-/// Tulis ulang body: setiap `[[target...]]` yang slug-nya == `old_slug` diganti
-/// targetnya menjadi `new_slug` (alias `|...` & heading `#...` dipertahankan).
-/// Dipakai oleh `memory_rename` untuk memperbarui wikilink di perujuk.
+/// Rewrite a body: every `[[target...]]` whose slug == `old_slug` has its target
+/// replaced with `new_slug` (alias `|...` & heading `#...` are preserved).
+/// Used by `memory_rename` to update wikilinks in referring memories.
 pub fn rewrite_wikilink_target(body: &str, old_slug: &str, new_slug: &str) -> String {
     let bytes = body.as_bytes();
     let mut out = String::with_capacity(body.len());
@@ -196,7 +197,7 @@ pub fn rewrite_wikilink_target(body: &str, old_slug: &str, new_slug: &str) -> St
     out
 }
 
-/// Periksa kesehatan graf: broken link + orphan.
+/// Check the health of the graph: broken links + orphans.
 pub fn doctor(memories: &[Memory]) -> DoctorReport {
     let graph = LinkGraph::build(memories);
 
@@ -234,7 +235,7 @@ pub fn doctor(memories: &[Memory]) -> DoctorReport {
         .collect();
     orphans.sort();
 
-    // Higiene metadata + deteksi stub (hanya butuh daftar memori).
+    // Metadata hygiene + stub detection (only needs the list of memories).
     let mut stubs = Vec::new();
     let mut no_description = Vec::new();
     let mut no_tags = Vec::new();
@@ -287,23 +288,23 @@ mod tests {
     #[test]
     fn extracts_wikilink_variants() {
         let got = extract_wikilinks(
-            "Lihat [[Auth Flow]], [[deploy|si deploy]], [[notes#bab-1]] dan ![[gambar]].",
+            "See [[Auth Flow]], [[deploy|the deploy]], [[notes#bab-1]] and ![[gambar]].",
         );
         assert_eq!(got, vec!["auth-flow", "deploy", "notes", "gambar"]);
     }
 
     #[test]
     fn outgoing_merges_links_and_body_without_self() {
-        let m = mem("a", "taut ke [[b]] dan [[a]] sendiri", &["c", "b"]);
-        // gabungan {b, c} dari field + {b} dari body, tanpa 'a'
+        let m = mem("a", "link to [[b]] and [[a]] itself", &["c", "b"]);
+        // union of {b, c} from the field + {b} from the body, without 'a'
         assert_eq!(outgoing_links(&m), vec!["b", "c"]);
     }
 
     #[test]
     fn backlinks_are_derived_both_directions() {
         let mems = vec![
-            mem("a", "ke [[b]]", &[]),
-            mem("b", "tak menaut siapa pun", &["c"]),
+            mem("a", "to [[b]]", &[]),
+            mem("b", "links to no one", &["c"]),
             mem("c", "", &[]),
         ];
         let g = LinkGraph::build(&mems);
@@ -315,9 +316,9 @@ mod tests {
     #[test]
     fn doctor_finds_broken_and_orphans() {
         let mems = vec![
-            mem("a", "ke [[b]] dan [[hantu]]", &[]), // hantu tak ada
+            mem("a", "to [[b]] and [[hantu]]", &[]), // hantu does not exist
             mem("b", "", &[]),
-            mem("sendirian", "tak ada relasi", &[]),
+            mem("sendirian", "no relations", &[]),
         ];
         let rep = doctor(&mems);
         assert_eq!(rep.total, 3);
@@ -330,37 +331,37 @@ mod tests {
             }]
         );
         assert_eq!(rep.orphans, vec!["sendirian"]);
-        // b tidak orphan (ditaut oleh a), a tidak orphan (punya outgoing)
+        // b is not an orphan (linked by a), a is not an orphan (has outgoing)
     }
 
     #[test]
     fn missing_targets_only_dangling() {
         let mems = [
-            mem("a", "ke [[b]] dan [[hantu]]", &["c"]),
+            mem("a", "to [[b]] and [[hantu]]", &["c"]),
             mem("b", "", &[]),
         ];
         let existing: BTreeSet<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
-        // 'b' ada, 'c' & 'hantu' tidak.
+        // 'b' exists, 'c' & 'hantu' do not.
         assert_eq!(missing_targets(&mems[0], &existing), vec!["c", "hantu"]);
     }
 
     #[test]
     fn rewrite_wikilink_keeps_alias_and_heading() {
-        let body = "Lihat [[Old Name]], [[old-name|alias]], [[old-name#bab]] dan [[lain]].";
+        let body = "See [[Old Name]], [[old-name|alias]], [[old-name#bab]] and [[lain]].";
         let got = rewrite_wikilink_target(body, "old-name", "baru");
         assert_eq!(
             got,
-            "Lihat [[baru]], [[baru|alias]], [[baru#bab]] dan [[lain]]."
+            "See [[baru]], [[baru|alias]], [[baru#bab]] and [[lain]]."
         );
     }
 
     #[test]
     fn doctor_flags_stub_and_missing_metadata() {
-        let mut s = mem("stub-note", "## ⚠️ STUB — PERLU DIISI\nnanti", &["x"]);
+        let mut s = mem("stub-note", "## ⚠️ STUB — TO BE FILLED IN\nlater", &["x"]);
         s.front.description = "  ".into();
         s.front.tags = vec![];
-        let mut ok = mem("ok-note", "isi lengkap", &["stub-note"]);
-        ok.front.description = "ada".into();
+        let mut ok = mem("ok-note", "full content", &["stub-note"]);
+        ok.front.description = "present".into();
         ok.front.tags = vec!["t".into()];
         let rep = doctor(&[s, ok]);
         assert_eq!(rep.stubs, vec!["stub-note"]);

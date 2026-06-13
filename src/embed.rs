@@ -1,60 +1,60 @@
-//! Pencarian semantik berbasis embedding lokal (pure-Rust via candle).
+//! Semantic search based on local embeddings (pure-Rust via candle).
 //!
-//! Fitur ini **opt-in**: hanya terkompilasi penuh bila crate dibangun dengan
-//! `--features semantic`. Tanpa feature itu, `semantic_search` mengembalikan
-//! error yang menjelaskan cara mengaktifkannya — sehingga tool tetap terdaftar
-//! di server apa pun build-nya.
+//! This feature is **opt-in**: it is only fully compiled when the crate is built
+//! with `--features semantic`. Without that feature, `semantic_search` returns an
+//! error explaining how to enable it — so the tool stays registered on the server
+//! regardless of the build.
 //!
-//! Desain:
-//! - Model: `sentence-transformers/all-MiniLM-L6-v2` (384 dim), diunduh sekali
-//!   ke cache HuggingFace lalu dipakai offline.
-//! - Embedding tiap memori (teks `name + description + body`) di-cache ke file
-//!   sidecar `memory/<project>/.embeddings.json`. Hanya memori yang berubah
-//!   (deteksi via hash isi) yang di-embed ulang.
-//! - Skor relevansi = cosine similarity. Karena vektor sudah L2-normalized,
-//!   cosine = dot product.
+//! Design:
+//! - Model: `sentence-transformers/all-MiniLM-L6-v2` (384 dim), downloaded once
+//!   into the HuggingFace cache and then used offline.
+//! - The embedding of each memory (the text `name + description + body`) is cached
+//!   to the sidecar file `memory/<project>/.embeddings.json`. Only memories that
+//!   changed (detected via a content hash) are re-embedded.
+//! - Relevance score = cosine similarity. Since the vectors are already
+//!   L2-normalized, cosine = dot product.
 
 use crate::config::Config;
 use crate::memory::Memory;
 use serde::{Deserialize, Serialize};
 
-/// Identitas model embedding (untuk invalidasi index bila model berganti).
-/// Model **multilingual** (50+ bahasa, termasuk Indonesia) — penting karena
-/// memori bisa berbahasa non-Inggris. Arsitektur BERT, 384 dim, tanpa prefix
-/// khusus, jadi drop-in untuk pipeline di bawah. Mengganti nilai ini otomatis
-/// meng-invalidasi semua index sidecar (lihat `EmbeddingIndex::load`).
+/// Embedding model identity (used to invalidate the index when the model changes).
+/// A **multilingual** model (50+ languages, including Indonesian) — important
+/// because memories may be in non-English languages. BERT architecture, 384 dim,
+/// no special prefix, so it is a drop-in for the pipeline below. Changing this
+/// value automatically invalidates all sidecar indexes (see `EmbeddingIndex::load`).
 pub const MODEL_ID: &str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2";
-/// Dimensi vektor embedding model di atas.
+/// Embedding vector dimension of the model above.
 pub const EMBED_DIM: usize = 384;
-/// Nama file sidecar index per project.
+/// Name of the per-project sidecar index file.
 const INDEX_FILE: &str = ".embeddings.json";
 
-/// Satu hasil pencarian semantik.
+/// A single semantic search result.
 #[derive(Debug, Clone, Serialize)]
 pub struct SemanticHit {
     pub name: String,
     pub description: String,
-    /// Cosine similarity terhadap query (−1.0..1.0; makin tinggi makin relevan).
+    /// Cosine similarity against the query (−1.0..1.0; higher is more relevant).
     pub score: f32,
 }
 
-// ===================== Index sidecar (selalu tersedia) =====================
+// ===================== Sidecar index (always available) =====================
 
-/// Entri index: hash isi (untuk deteksi perubahan) + vektor embedding.
+/// Index entry: content hash (for change detection) + embedding vector.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct IndexEntry {
     hash: u64,
     vector: Vec<f32>,
 }
 
-/// Index embedding satu project, disimpan sebagai file sidecar JSON.
+/// The embedding index of a single project, stored as a JSON sidecar file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct EmbeddingIndex {
-    /// Model yang dipakai; bila beda dengan `MODEL_ID` sekarang, index dibuang.
+    /// The model used; if it differs from the current `MODEL_ID`, the index is discarded.
     model: String,
-    /// Dimensi vektor; pengaman tambahan.
+    /// Vector dimension; an extra safeguard.
     dim: usize,
-    /// slug -> entri.
+    /// slug -> entry.
     entries: std::collections::BTreeMap<String, IndexEntry>,
 }
 
@@ -67,8 +67,8 @@ impl EmbeddingIndex {
         }
     }
 
-    /// Muat index dari disk; kembalikan index kosong bila tidak ada / tak cocok
-    /// (model atau dimensi berubah) / korup.
+    /// Load the index from disk; return an empty index if it is missing /
+    /// mismatched (model or dimension changed) / corrupt.
     fn load(config: &Config, project: &str) -> Self {
         let path = config.project_dir(project).join(INDEX_FILE);
         let Ok(raw) = std::fs::read_to_string(&path) else {
@@ -76,7 +76,7 @@ impl EmbeddingIndex {
         };
         match serde_json::from_str::<EmbeddingIndex>(&raw) {
             Ok(idx) if idx.model == MODEL_ID && idx.dim == EMBED_DIM => idx,
-            _ => Self::empty(), // model/dim berubah atau korup → buang
+            _ => Self::empty(), // model/dim changed or corrupt → discard
         }
     }
 
@@ -87,7 +87,7 @@ impl EmbeddingIndex {
     }
 }
 
-/// Teks yang di-embed untuk sebuah memori.
+/// The text that is embedded for a memory.
 fn memory_text(m: &Memory) -> String {
     format!(
         "{}\n{}\n{}",
@@ -97,7 +97,7 @@ fn memory_text(m: &Memory) -> String {
     )
 }
 
-/// Hash isi memori (FNV-1a 64-bit) untuk deteksi perubahan — cukup & tanpa dep.
+/// Content hash of a memory (FNV-1a 64-bit) for change detection — sufficient and dependency-free.
 fn content_hash(text: &str) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for b in text.as_bytes() {
@@ -107,13 +107,13 @@ fn content_hash(text: &str) -> u64 {
     h
 }
 
-/// Cosine similarity dua vektor ternormalisasi (= dot product). Aman bila
-/// panjang beda (ambil minimum) walau idealnya selalu sama.
+/// Cosine similarity of two normalized vectors (= dot product). Safe when the
+/// lengths differ (takes the minimum), though ideally they are always equal.
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
-// ============================ Jalur dengan feature ============================
+// ============================ Path with the feature enabled ============================
 
 #[cfg(feature = "semantic")]
 mod backend {
@@ -126,7 +126,7 @@ mod backend {
     use std::sync::Mutex;
     use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer};
 
-    /// Pembungkus model BERT + tokenizer. Dibangun sekali, dipakai berulang.
+    /// Wrapper around the BERT model + tokenizer. Built once, used repeatedly.
     pub struct Embedder {
         model: BertModel,
         tokenizer: Tokenizer,
@@ -134,19 +134,21 @@ mod backend {
     }
 
     impl Embedder {
-        /// Muat model (blocking; unduh saat run pertama lalu pakai cache HF).
+        /// Load the model (blocking; downloads on the first run, then uses the HF cache).
         pub fn load() -> anyhow::Result<Self> {
             let device = Device::Cpu;
             let repo = Repo::new(MODEL_ID.to_string(), RepoType::Model);
             let api = Api::new()
-                .context("gagal inisialisasi HuggingFace API")?
+                .context("failed to initialize HuggingFace API")?
                 .repo(repo);
 
-            let config_path = api.get("config.json").context("unduh config.json")?;
-            let tokenizer_path = api.get("tokenizer.json").context("unduh tokenizer.json")?;
+            let config_path = api.get("config.json").context("download config.json")?;
+            let tokenizer_path = api
+                .get("tokenizer.json")
+                .context("download tokenizer.json")?;
             let weights_path = api
                 .get("model.safetensors")
-                .context("unduh model.safetensors")?;
+                .context("download model.safetensors")?;
 
             let bert_config: BertConfig =
                 serde_json::from_str(&std::fs::read_to_string(config_path)?)?;
@@ -168,7 +170,7 @@ mod backend {
             })
         }
 
-        /// Embed sekumpulan teks → satu vektor ternormalisasi (384 dim) per teks.
+        /// Embed a batch of texts → one normalized vector (384 dim) per text.
         pub fn embed(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
             if texts.is_empty() {
                 return Ok(Vec::new());
@@ -193,7 +195,7 @@ mod backend {
                 self.model
                     .forward(&input_ids, &token_type_ids, Some(&attention_mask))?;
 
-            // Masked mean pooling: abaikan token padding agar embedding benar.
+            // Masked mean pooling: ignore padding tokens so the embedding is correct.
             let mask = attention_mask.to_dtype(DTYPE)?.unsqueeze(2)?; // (b, seq, 1)
             let sum_mask = mask.sum(1)?; // (b, 1)
             let summed = embeddings.broadcast_mul(&mask)?.sum(1)?; // (b, 384)
@@ -205,12 +207,12 @@ mod backend {
         }
     }
 
-    /// Embedder global (lazy): dibangun saat pertama dipakai, lalu di-cache.
-    /// `Mutex<Option<...>>` karena `BertModel::forward` butuh konteks eksklusif
-    /// & pemuatan model mahal (sekali saja).
+    /// Global embedder (lazy): built on first use, then cached.
+    /// `Mutex<Option<...>>` because `BertModel::forward` needs exclusive context
+    /// and loading the model is expensive (done only once).
     static EMBEDDER: Mutex<Option<std::sync::Arc<Embedder>>> = Mutex::new(None);
 
-    /// Ambil embedder global, memuatnya bila belum ada.
+    /// Get the global embedder, loading it if not already present.
     fn embedder() -> anyhow::Result<std::sync::Arc<Embedder>> {
         let mut guard = EMBEDDER.lock().unwrap();
         if let Some(e) = guard.as_ref() {
@@ -221,9 +223,9 @@ mod backend {
         Ok(e)
     }
 
-    /// Pastikan index project mutakhir terhadap daftar memori (incremental):
-    /// embed hanya memori baru/berubah, buang yang sudah dihapus, simpan ke disk.
-    /// Mengembalikan index siap-pakai.
+    /// Ensure the project index is up to date with the list of memories (incremental):
+    /// embed only new/changed memories, drop deleted ones, and save to disk.
+    /// Returns a ready-to-use index.
     pub(super) fn ensure_index(
         config: &Config,
         project: &str,
@@ -231,7 +233,7 @@ mod backend {
     ) -> anyhow::Result<EmbeddingIndex> {
         let mut index = EmbeddingIndex::load(config, project);
 
-        // Tentukan memori yang perlu di-embed (baru atau hash berubah).
+        // Determine which memories need embedding (new or with a changed hash).
         let mut to_embed: Vec<(String, String)> = Vec::new(); // (slug, text)
         let mut wanted: std::collections::BTreeSet<String> = Default::default();
         for m in memories {
@@ -240,12 +242,12 @@ mod backend {
             let text = memory_text(m);
             let h = content_hash(&text);
             match index.entries.get(&slug) {
-                Some(e) if e.hash == h => {} // masih segar
+                Some(e) if e.hash == h => {} // still fresh
                 _ => to_embed.push((slug, text)),
             }
         }
 
-        // Buang entri memori yang sudah tidak ada.
+        // Drop entries for memories that no longer exist.
         index.entries.retain(|slug, _| wanted.contains(slug));
 
         if !to_embed.is_empty() {
@@ -267,24 +269,23 @@ mod backend {
         Ok(index)
     }
 
-    /// Embed satu query menjadi vektor ternormalisasi.
+    /// Embed a single query into a normalized vector.
     pub(super) fn embed_query(query: &str) -> anyhow::Result<Vec<f32>> {
         let emb = embedder()?;
         let mut v = emb.embed(&[query.to_string()])?;
         v.pop()
-            .ok_or_else(|| anyhow::anyhow!("embedding query kosong"))
+            .ok_or_else(|| anyhow::anyhow!("empty query embedding"))
     }
 }
 
-// ============================ API publik modul ============================
+// ============================ Public module API ============================
 
-/// Vektor embedding tiap memori (slug → vektor ternormalisasi), bila tersedia.
+/// The embedding vector of each memory (slug → normalized vector), when available.
 ///
-/// Mengembalikan `Some(map)` hanya bila build memakai fitur `semantic` DAN
-/// index berhasil dibangun/dibaca. Mengembalikan `None` bila fitur mati —
-/// pemanggil (suggest/cluster) lalu fallback ke metode non-embedding.
-/// Tidak pernah error: kegagalan apa pun diperlakukan sebagai `None` agar
-/// fitur lama tetap berjalan.
+/// Returns `Some(map)` only when the build uses the `semantic` feature AND the
+/// index is successfully built/read. Returns `None` when the feature is disabled —
+/// the caller (suggest/cluster) then falls back to the non-embedding method.
+/// Never errors: any failure is treated as `None` so existing features keep working.
 #[cfg(feature = "semantic")]
 pub fn vectors_for(
     config: &Config,
@@ -300,7 +301,7 @@ pub fn vectors_for(
     Some(map)
 }
 
-/// Varian tanpa feature: selalu `None` → pemanggil pakai metode lama.
+/// Variant without the feature: always `None` → the caller uses the old method.
 #[cfg(not(feature = "semantic"))]
 pub fn vectors_for(
     _config: &Config,
@@ -310,16 +311,16 @@ pub fn vectors_for(
     None
 }
 
-/// Cosine similarity dua vektor ternormalisasi (= dot product), publik agar
-/// dipakai modul suggest/cluster. Aman bila panjang beda (ambil yang terpendek).
+/// Cosine similarity of two normalized vectors (= dot product), public so it can
+/// be used by the suggest/cluster modules. Safe when lengths differ (takes the shortest).
 pub fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
-/// Pencarian semantik: kembalikan memori paling relevan dengan `query`.
+/// Semantic search: return the memories most relevant to `query`.
 ///
-/// Bila feature `semantic` tidak aktif, mengembalikan error yang menjelaskan
-/// cara mengaktifkannya.
+/// If the `semantic` feature is disabled, returns an error explaining how to
+/// enable it.
 #[cfg(feature = "semantic")]
 pub fn semantic_search(
     config: &Config,
@@ -333,7 +334,7 @@ pub fn semantic_search(
     let index = backend::ensure_index(config, project, memories)?;
     let qvec = backend::embed_query(query)?;
 
-    // Peta slug → deskripsi untuk melengkapi hasil.
+    // Map slug → description to enrich the results.
     let desc: HashMap<String, String> = memories
         .iter()
         .map(|m| {
@@ -363,7 +364,7 @@ pub fn semantic_search(
     Ok(hits)
 }
 
-/// Varian tanpa feature: jelaskan cara mengaktifkan.
+/// Variant without the feature: explain how to enable it.
 #[cfg(not(feature = "semantic"))]
 pub fn semantic_search(
     _config: &Config,
@@ -373,9 +374,9 @@ pub fn semantic_search(
     _memories: &[Memory],
 ) -> anyhow::Result<Vec<SemanticHit>> {
     anyhow::bail!(
-        "pencarian semantik tidak tersedia di build ini. Rebuild dengan \
-         `cargo build --release --features semantic` (mengunduh model ~90MB \
-         saat run pertama, lalu offline)."
+        "Semantic search is not available in this build. Rebuild with \
+         `cargo build --release --features semantic` (this downloads a ~90MB model \
+         on the first run, then works offline)."
     )
 }
 
@@ -391,7 +392,7 @@ mod tests {
 
     #[test]
     fn cosine_of_identical_normalized_is_one() {
-        // vektor ternormalisasi sederhana.
+        // a simple normalized vector.
         let v = vec![0.6, 0.8];
         assert!((cosine(&v, &v) - 1.0).abs() < 1e-6);
     }

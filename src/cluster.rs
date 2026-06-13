@@ -1,65 +1,68 @@
-//! Klaster memori menjadi "tema" via deteksi komunitas **Louvain** pada graf
-//! tautan (tak-berarah).
+//! Cluster memories into "themes" via **Louvain** community detection on the
+//! (undirected) link graph.
 //!
-//! Graf dibangun dari `LinkGraph`: setiap tautan A→B (field `links` atau
-//! `[[wikilink]]` di body, yang targetnya ada) menjadi edge tak-berarah A↔B
-//! berbobot 1 (bobot diakumulasi bila ada beberapa tautan antar pasangan sama).
+//! The graph is built from `LinkGraph`: every link A→B (the `links` field or a
+//! `[[wikilink]]` in the body whose target exists) becomes an undirected edge
+//! A↔B with weight 1 (weights accumulate when multiple links exist between the
+//! same pair).
 //!
-//! Louvain memaksimalkan **modularity** Q:
+//! Louvain maximizes **modularity** Q:
 //! ```text
 //! Q = (1 / 2m) * Σ_ij [ A_ij - (k_i * k_j) / 2m ] * δ(c_i, c_j)
 //! ```
-//! dengan `A_ij` bobot edge, `k_i` derajat berbobot node i, `m` total bobot edge,
-//! dan `δ` = 1 bila i & j sekomunitas. Implementasi ini menjalankan satu level
-//! (local-moving) yang sudah cukup untuk graf memori berukuran kecil–menengah;
-//! node tanpa edge menjadi komunitas singleton-nya sendiri.
+//! where `A_ij` is the edge weight, `k_i` the weighted degree of node i, `m` the
+//! total edge weight, and `δ` = 1 when i & j share a community. This
+//! implementation runs a single level (local-moving), which is sufficient for
+//! small-to-medium memory graphs; nodes without edges become their own singleton
+//! community.
 
 use crate::links::LinkGraph;
 use crate::memory::Memory;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 
-/// Satu komunitas/tema hasil klaster.
+/// A single community/theme produced by clustering.
 #[derive(Debug, Clone, Serialize)]
 pub struct Cluster {
-    /// Anggota (slug memori), terurut.
+    /// Members (memory slugs), sorted.
     pub members: Vec<String>,
 }
 
-/// Hasil klaster sebuah project.
+/// Clustering result for a project.
 #[derive(Debug, Clone, Serialize)]
 pub struct ClusterResult {
-    /// Nilai modularity akhir (−0.5..1.0; makin tinggi makin tegas komunitasnya).
+    /// Final modularity value (−0.5..1.0; higher means more sharply defined communities).
     pub modularity: f64,
-    /// Daftar komunitas, terurut dari anggota terbanyak.
+    /// List of communities, sorted from most members to fewest.
     pub clusters: Vec<Cluster>,
 }
 
-/// Representasi graf tak-berarah berbobot dengan node berindeks `0..n`.
+/// Representation of a weighted undirected graph with nodes indexed `0..n`.
 struct Graph {
     n: usize,
-    /// adjacency: node -> [(tetangga, bobot)]
+    /// adjacency: node -> [(neighbor, weight)]
     adj: Vec<Vec<(usize, f64)>>,
-    /// derajat berbobot tiap node (termasuk 2× self-loop bila ada).
+    /// weighted degree of each node (including 2× self-loop when present).
     degree: Vec<f64>,
-    /// total bobot edge `m` (Σ bobot, self-loop dihitung sekali).
+    /// total edge weight `m` (Σ weights, self-loops counted once).
     total: f64,
 }
 
 impl Graph {
-    /// Bangun graf tak-berarah dari `LinkGraph`, opsional diperkaya dengan edge
-    /// kemiripan embedding. Mengembalikan graf + daftar slug terurut (indeks
-    /// node = posisi di slice ini).
+    /// Build an undirected graph from `LinkGraph`, optionally enriched with
+    /// embedding similarity edges. Returns the graph + a sorted list of slugs
+    /// (node index = position in this slice).
     ///
-    /// `emb`: bila `Some`, tiap pasang memori dengan cosine ≥ `sim_threshold`
-    /// mendapat edge tambahan berbobot = cosine-nya. Ini membuat memori yang
-    /// **mirip secara makna** ikut mengelompok walau belum saling menaut.
+    /// `emb`: when `Some`, every pair of memories with cosine ≥ `sim_threshold`
+    /// gets an additional edge weighted by its cosine. This makes memories that
+    /// are **semantically similar** cluster together even when they do not link
+    /// to each other.
     fn from_links(
         graph: &LinkGraph,
         emb: Option<&Embeddings>,
         sim_threshold: f64,
     ) -> (Self, Vec<String>) {
-        // Node = semua memori yang ada, terurut agar deterministik.
+        // Nodes = all existing memories, sorted for determinism.
         let slugs: Vec<String> = graph.existing.iter().cloned().collect();
         let index: HashMap<&str, usize> = slugs
             .iter()
@@ -68,7 +71,7 @@ impl Graph {
             .collect();
         let n = slugs.len();
 
-        // Akumulasi bobot edge tak-berarah ke map berkunci (min,max).
+        // Accumulate undirected edge weights into a map keyed by (min,max).
         let mut weights: BTreeMap<(usize, usize), f64> = BTreeMap::new();
         for (from, outs) in &graph.forward {
             let Some(&u) = index.get(from.as_str()) else {
@@ -76,21 +79,21 @@ impl Graph {
             };
             for to in outs {
                 let Some(&v) = index.get(to.as_str()) else {
-                    continue; // tautan ke memori tak-ada → diabaikan
+                    continue; // link to a non-existent memory → ignored
                 };
                 if u == v {
-                    continue; // tak ada self-link
+                    continue; // no self-link
                 }
                 let key = (u.min(v), u.max(v));
                 *weights.entry(key).or_insert(0.0) += 1.0;
             }
         }
 
-        // Edge kemiripan embedding (bila tersedia): semua pasangan di atas
-        // ambang. O(n²) cosine — cukup untuk skala memori per-project.
+        // Embedding similarity edges (when available): all pairs above the
+        // threshold. O(n²) cosine — fine at per-project memory scale.
         if let Some(map) = emb {
-            // a & b dipakai sebagai indeks tuple di `weights`; rewrite iterator
-            // justru mengaburkan maksudnya.
+            // a & b are used as tuple indices into `weights`; rewriting this as
+            // an iterator would only obscure the intent.
             #[allow(clippy::needless_range_loop)]
             for a in 0..n {
                 let Some(va) = map.get(&slugs[a]) else {
@@ -131,21 +134,21 @@ impl Graph {
     }
 }
 
-/// Jalankan Louvain (satu level local-moving) dan kembalikan label komunitas
-/// per node (`comm[i]` = id komunitas node i, belum tentu rapat).
+/// Run Louvain (a single local-moving level) and return the community label per
+/// node (`comm[i]` = community id of node i, not necessarily compact).
 fn louvain_labels(g: &Graph) -> Vec<usize> {
-    // Mula-mula tiap node komunitasnya sendiri.
+    // Initially each node is its own community.
     let mut comm: Vec<usize> = (0..g.n).collect();
-    // Σ_tot[c] = total derajat berbobot semua node di komunitas c.
+    // Σ_tot[c] = total weighted degree of all nodes in community c.
     let mut sigma_tot: Vec<f64> = g.degree.clone();
 
     if g.total == 0.0 {
-        return comm; // tak ada edge: semua singleton
+        return comm; // no edges: everything is a singleton
     }
     let m2 = 2.0 * g.total; // 2m
 
     let mut improved = true;
-    // batasi iterasi agar pasti berhenti walau ada osilasi numerik.
+    // bound the iterations so it always terminates despite numeric oscillation.
     let mut rounds = 0;
     while improved && rounds < 100 {
         improved = false;
@@ -155,31 +158,31 @@ fn louvain_labels(g: &Graph) -> Vec<usize> {
             let ci = comm[i];
             let ki = g.degree[i];
 
-            // Bobot dari i ke tiap komunitas tetangga (termasuk komunitasnya kini).
+            // Weight from i to each neighboring community (including its current one).
             let mut w_to: HashMap<usize, f64> = HashMap::new();
             for &(j, w) in &g.adj[i] {
                 *w_to.entry(comm[j]).or_insert(0.0) += w;
             }
 
-            // Lepaskan i dari komunitasnya: kurangi kontribusi derajatnya.
+            // Detach i from its community: subtract its degree contribution.
             sigma_tot[ci] -= ki;
 
-            // Cari komunitas terbaik (gain modularity terbesar). Basis = tetap di ci.
-            // ΔQ untuk pindah ke c ∝ w_to[c] - Σ_tot[c] * k_i / 2m.
+            // Find the best community (largest modularity gain). Baseline = staying in ci.
+            // ΔQ for moving to c ∝ w_to[c] - Σ_tot[c] * k_i / 2m.
             let mut best_comm = ci;
             let w_to_ci = w_to.get(&ci).copied().unwrap_or(0.0);
             let mut best_gain = w_to_ci - sigma_tot[ci] * ki / m2;
 
             for (&c, &w_ic) in &w_to {
                 let gain = w_ic - sigma_tot[c] * ki / m2;
-                // `>` ketat + tie-break ke id komunitas terkecil demi determinisme.
+                // strict `>` + tie-break to the smallest community id for determinism.
                 if gain > best_gain || (gain == best_gain && c < best_comm) {
                     best_gain = gain;
                     best_comm = c;
                 }
             }
 
-            // Tempatkan i di komunitas terpilih.
+            // Place i in the chosen community.
             sigma_tot[best_comm] += ki;
             if best_comm != ci {
                 comm[i] = best_comm;
@@ -191,51 +194,51 @@ fn louvain_labels(g: &Graph) -> Vec<usize> {
     comm
 }
 
-/// Hitung modularity Q untuk pelabelan komunitas tertentu.
+/// Compute modularity Q for a given community labeling.
 fn modularity(g: &Graph, comm: &[usize]) -> f64 {
     if g.total == 0.0 {
         return 0.0;
     }
     let m2 = 2.0 * g.total;
 
-    // Σ_in (bobot edge internal, dihitung 2× karena tak-berarah) & Σ_tot per komunitas.
+    // Σ_in (internal edge weight, counted 2× since undirected) & Σ_tot per community.
     let mut sigma_in: HashMap<usize, f64> = HashMap::new();
     let mut sigma_tot: HashMap<usize, f64> = HashMap::new();
     for i in 0..g.n {
         *sigma_tot.entry(comm[i]).or_insert(0.0) += g.degree[i];
         for &(j, w) in &g.adj[i] {
             if comm[j] == comm[i] {
-                *sigma_in.entry(comm[i]).or_insert(0.0) += w; // tiap edge internal terhitung 2×
+                *sigma_in.entry(comm[i]).or_insert(0.0) += w; // each internal edge counted 2×
             }
         }
     }
 
     let mut q = 0.0;
     for (c, &tot) in &sigma_tot {
-        let inside = sigma_in.get(c).copied().unwrap_or(0.0); // = 2 * bobot internal
+        let inside = sigma_in.get(c).copied().unwrap_or(0.0); // = 2 * internal weight
         q += inside / m2 - (tot / m2).powi(2);
     }
     q
 }
 
-/// Ambang cosine default agar dua memori dianggap "mirip" untuk edge tema.
-/// Sengaja cukup tinggi: model multilingual cenderung memberi cosine ~0.4–0.5
-/// bahkan untuk pasangan yang hanya bertema longgar, sehingga ambang rendah
-/// membuat graf terhubung penuh & semua memori melebur jadi satu tema. 0.6
-/// menjaga hanya pasangan yang benar-benar berdekatan makna yang ditautkan.
+/// Default cosine threshold for two memories to be considered "similar" enough
+/// for a theme edge. Deliberately fairly high: multilingual models tend to give
+/// cosine ~0.4–0.5 even for pairs that are only loosely related, so a low
+/// threshold makes the graph fully connected & merges all memories into a single
+/// theme. 0.6 keeps only pairs that are genuinely close in meaning linked.
 pub const DEFAULT_SIM_THRESHOLD: f64 = 0.6;
 
-/// Peta embedding opsional: slug → vektor ternormalisasi.
+/// Optional embedding map: slug → normalized vector.
 pub type Embeddings = std::collections::HashMap<String, Vec<f32>>;
 
-/// Klaster memori sebuah project menjadi tema via Louvain (graf tautan saja).
+/// Cluster a project's memories into themes via Louvain (link graph only).
 pub fn cluster(memories: &[Memory]) -> ClusterResult {
     cluster_ext(memories, None, DEFAULT_SIM_THRESHOLD)
 }
 
-/// Seperti [`cluster`], tapi bila `emb` diberikan, graf diperkaya dengan edge
-/// kemiripan embedding (cosine ≥ `sim_threshold`) sebelum Louvain — sehingga
-/// tema terbentuk dari tautan DAN kedekatan makna.
+/// Like [`cluster`], but when `emb` is given the graph is enriched with
+/// embedding similarity edges (cosine ≥ `sim_threshold`) before Louvain — so
+/// themes are formed from links AND semantic proximity.
 pub fn cluster_ext(
     memories: &[Memory],
     emb: Option<&Embeddings>,
@@ -247,7 +250,7 @@ pub fn cluster_ext(
     let labels = louvain_labels(&g);
     let q = modularity(&g, &labels);
 
-    // Kelompokkan slug per label komunitas.
+    // Group slugs by community label.
     let mut groups: BTreeMap<usize, Vec<String>> = BTreeMap::new();
     for (i, &c) in labels.iter().enumerate() {
         groups.entry(c).or_default().push(slugs[i].clone());
@@ -261,7 +264,7 @@ pub fn cluster_ext(
         })
         .collect();
 
-    // Urutkan: komunitas terbesar dulu, lalu alfabetis anggota pertama.
+    // Sort: largest community first, then alphabetically by first member.
     clusters.sort_by(|a, b| {
         b.members
             .len()
@@ -297,11 +300,11 @@ mod tests {
 
     #[test]
     fn two_cliques_become_two_clusters() {
-        // Dua segitiga {a,b,c} dan {x,y,z} dengan satu jembatan c-x.
+        // Two triangles {a,b,c} and {x,y,z} with a single bridge c-x.
         let mems = vec![
             mem("a", &["b", "c"]),
             mem("b", &["c"]),
-            mem("c", &["x"]), // jembatan
+            mem("c", &["x"]), // bridge
             mem("x", &["y", "z"]),
             mem("y", &["z"]),
             mem("z", &[]),
@@ -310,17 +313,17 @@ mod tests {
         assert_eq!(
             res.clusters.len(),
             2,
-            "harus 2 komunitas, dapat {:?}",
+            "expected 2 communities, got {:?}",
             res.clusters
         );
-        // modularity untuk dua klik yang nyaris terpisah harus positif & cukup tinggi.
+        // modularity for two nearly separate cliques should be positive & fairly high.
         assert!(
             res.modularity > 0.3,
-            "modularity rendah: {}",
+            "modularity too low: {}",
             res.modularity
         );
 
-        // a,b,c sekomunitas; x,y,z sekomunitas.
+        // a,b,c share a community; x,y,z share a community.
         let comm_of = |slug: &str| {
             res.clusters
                 .iter()
@@ -346,9 +349,9 @@ mod tests {
     fn connected_pair_clusters_together() {
         let mems = vec![mem("a", &["b"]), mem("b", &[]), mem("lone", &[])];
         let res = cluster(&mems);
-        // {a,b} satu komunitas, {lone} sendiri → 2 komunitas.
+        // {a,b} one community, {lone} on its own → 2 communities.
         assert_eq!(res.clusters.len(), 2);
-        assert_eq!(res.clusters[0].members, vec!["a", "b"]); // terbesar dulu
+        assert_eq!(res.clusters[0].members, vec!["a", "b"]); // largest first
         assert_eq!(res.clusters[1].members, vec!["lone"]);
     }
 
