@@ -138,7 +138,41 @@ accept an optional `project` argument (auto-detected if empty).
 | `OBSIDIAN_DEFAULT_PROJECT` | | — | Default project when auto-detection fails |
 | `RUST_LOG` | | `info` | Log level (written to stderr) |
 
-## Build
+## Install (prebuilt binary — no Rust needed)
+
+Each release ships standalone executables for macOS, Linux, and Windows. You do
+**not** need the Rust toolchain — download the binary and run it.
+
+**One-line install (macOS / Linux):**
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/adrnsyr/mcp-obsidian/releases/latest/download/mcp-obsidian-installer.sh | sh
+```
+
+**Windows (PowerShell):**
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/adrnsyr/mcp-obsidian/releases/latest/download/mcp-obsidian-installer.ps1 | iex"
+```
+
+**Manual download:** grab the archive for your platform from the
+[Releases page](https://github.com/adrnsyr/mcp-obsidian/releases/latest),
+extract it, and put the `mcp-obsidian` binary somewhere on your `PATH`.
+
+| Platform | Asset |
+|----------|-------|
+| macOS (Apple Silicon) | `mcp-obsidian-aarch64-apple-darwin.tar.xz` |
+| macOS (Intel) | `mcp-obsidian-x86_64-apple-darwin.tar.xz` |
+| Linux (x86_64) | `mcp-obsidian-x86_64-unknown-linux-gnu.tar.xz` |
+| Linux (ARM64) | `mcp-obsidian-aarch64-unknown-linux-gnu.tar.xz` |
+| Windows (x86_64) | `mcp-obsidian-x86_64-pc-windows-msvc.zip` |
+
+> Prebuilt binaries are the **default (lightweight) build** — semantic search is
+> not included. If you need `memory_semantic_search`, build from source with the
+> `semantic` feature (see below).
+
+## Build (from source)
 
 ```bash
 cargo build --release

@@ -43,3 +43,8 @@ hf-hub = { version = "0.5", optional = true }
 
 # --- Opsional: hanya ikut terkompilasi bila feature `watch` aktif ---
 notify-debouncer-full = { version = "0.7", optional = true }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
